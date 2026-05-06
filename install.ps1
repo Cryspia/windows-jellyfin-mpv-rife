@@ -400,7 +400,8 @@ function Install-Ffmpeg {
 function Test-PythonModule {
     param(
         [string]$PythonExe,
-        [string]$Code
+        [string]$Code,
+        [switch]$ShowOutput
     )
 
     if (-not (Test-Path $PythonExe)) {
@@ -408,13 +409,25 @@ function Test-PythonModule {
     }
     Ensure-Directory $CacheDir
     $scriptPath = Join-Path $CacheDir ("python-check-" + [Guid]::NewGuid().ToString("N") + ".py")
+    $stdoutPath = Join-Path $CacheDir ("python-check-" + [Guid]::NewGuid().ToString("N") + ".out")
+    $stderrPath = Join-Path $CacheDir ("python-check-" + [Guid]::NewGuid().ToString("N") + ".err")
     Set-PortablePythonEnvironment
     try {
         Set-Content -Path $scriptPath -Value $Code -Encoding UTF8
-        $p = Start-Process -FilePath $PythonExe -ArgumentList @($scriptPath) -WorkingDirectory $ProjectRoot -Wait -NoNewWindow -PassThru
+        $p = Start-Process -FilePath $PythonExe -ArgumentList @($scriptPath) -WorkingDirectory $ProjectRoot -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        if ($ShowOutput) {
+            if (Test-Path $stdoutPath) {
+                Get-Content -LiteralPath $stdoutPath
+            }
+            if (Test-Path $stderrPath) {
+                Get-Content -LiteralPath $stderrPath | ForEach-Object { Write-Host $_ }
+            }
+        }
         return ($p.ExitCode -eq 0)
     } finally {
         Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -1489,7 +1502,7 @@ function Test-All {
     $pythonExe = Join-Path $PythonDir "python.exe"
     Set-PortablePythonEnvironment
     Invoke-Logged $pythonExe @("-m", "pip", "check")
-    $ok = Test-PythonModule $pythonExe "import torch, torch_tensorrt, tensorrt, vapoursynth, vsrife`ntorch.ones(1, device='cuda')`nprint('python cuda/vapoursynth/rife ok')"
+    $ok = Test-PythonModule $pythonExe "import torch, torch_tensorrt, tensorrt, vapoursynth, vsrife`ntorch.ones(1, device='cuda')`nprint('python cuda/vapoursynth/rife ok')" -ShowOutput
     if (-not $ok) {
         throw "Python CUDA/VapourSynth/RIFE import test failed."
     }
