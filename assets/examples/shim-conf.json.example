@@ -1,0 +1,11 @@
+{
+  "mpv_ext": true,
+  "mpv_ext_path": "",
+  "mpv_ext_ipc": "",
+  "fullscreen": true,
+  "enable_gui": true,
+  "enable_osc": true,
+  "media_ended_cmd": null,
+  "pre_media_cmd": null,
+  "stop_cmd": null
+}

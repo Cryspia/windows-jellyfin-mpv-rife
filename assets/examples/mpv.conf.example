@@ -1,0 +1,39 @@
+# Windows mpv config for NVIDIA d3d11vpp RTX Video Super Resolution + RIFE.
+# Persistent path: config/mpv/mpv.conf
+
+vo=gpu-next
+gpu-api=d3d11
+gpu-context=d3d11
+hwdec=d3d11va
+profile=gpu-hq
+
+video-sync=display-resample
+interpolation=no
+tscale=oversample
+
+scale=ewa_lanczossharp
+cscale=ewa_lanczossharp
+dscale=mitchell
+correct-downscaling=yes
+linear-downscaling=yes
+sigmoid-upscaling=yes
+deband=yes
+target-colorspace-hint=yes
+dither-depth=auto
+
+secondary-sub-ass-override=no
+secondary-sub-pos=0
+
+# Windows default: scripts/autovsr.lua appends @vsr:d3d11vpp after any RIFE vf.
+# Do not load GLSL upscalers by default. If NVIDIA VSR is off, enable it in
+# NVIDIA App / Control Panel instead of silently falling back to shader upscale.
+
+[rife-4k60-heavy]
+profile-cond=(p["container-fps"] or 999)<60
+profile-restore=copy-equal
+vf=vapoursynth=file=~~/rife-4.26.vpy
+
+[no-rife-high-fps-or-large]
+profile-cond=(p["container-fps"] or 0)>=60
+profile-restore=copy-equal
+vf=

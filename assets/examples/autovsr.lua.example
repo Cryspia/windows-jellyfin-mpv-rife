@@ -1,0 +1,59 @@
+local mp = require("mp")
+
+local applying = false
+
+local function has_vsr(vf)
+    return vf and string.find(vf, "@vsr", 1, true) ~= nil
+end
+
+local function supported_format(fmt)
+    return fmt == "nv12" or fmt == "p010" or fmt == "yuv420p" or fmt == "yuv420p10"
+end
+
+local function autovsr()
+    if applying then
+        return
+    end
+
+    local display_width = mp.get_property_native("display-width")
+    local display_height = mp.get_property_native("display-height")
+    local video_width = mp.get_property_native("width")
+    local video_height = mp.get_property_native("height")
+    local pixfmt = mp.get_property_native("video-params/hw-pixelformat") or mp.get_property_native("video-params/pixelformat")
+    local vf = mp.get_property("vf")
+
+    if not display_width or not display_height or not video_width or not video_height then
+        return
+    end
+
+    local source_is_1080p_or_lower = video_width <= 1920 and video_height <= 1080
+    local scale = math.max(display_width, display_height) / math.max(video_width, video_height)
+    scale = math.floor(scale * 10) / 10
+    if source_is_1080p_or_lower and scale > 1.0 and supported_format(pixfmt) then
+        if has_vsr(vf) then
+            return
+        end
+        applying = true
+        if scale > 4.0 then
+            scale = 4.0
+        end
+        mp.commandv("vf", "append", "@vsr:d3d11vpp=scale=" .. scale .. ":scaling-mode=nvidia")
+        applying = false
+        return
+    end
+
+    if has_vsr(vf) then
+        applying = true
+        mp.commandv("vf", "remove", "@vsr")
+        applying = false
+    end
+end
+
+mp.observe_property("display-width", "native", autovsr)
+mp.observe_property("display-height", "native", autovsr)
+mp.observe_property("width", "native", autovsr)
+mp.observe_property("height", "native", autovsr)
+mp.observe_property("video-params/pixelformat", "native", autovsr)
+mp.observe_property("video-params/hw-pixelformat", "native", autovsr)
+mp.observe_property("vf", "native", autovsr)
+mp.register_event("file-loaded", autovsr)

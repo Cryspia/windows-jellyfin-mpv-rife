@@ -1,0 +1,12 @@
+# Generated portable runtime and local test media
+/jellyfin-mpv-shim-portable/
+/portable/
+/sample-video/
+
+# Local secrets, logs, caches, and temporary backup folders
+/.tmp-*/
+*.log
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db

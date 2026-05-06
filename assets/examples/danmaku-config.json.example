@@ -1,0 +1,6 @@
+{
+  "config_root": "config/danmaku",
+  "cache_root": "config/cache/danmaku",
+  "use_proxy": true,
+  "enabled": true
+}

@@ -1,0 +1,5 @@
+# F9 cycles RIFE modes manually: heavy -> light -> off.
+F9 cycle-values vf "vapoursynth=file=~~/rife-4.26.vpy" "vapoursynth=file=~~/rife-4.6-light.vpy" ""; show-text "RIFE: ${vf}" 2500
+
+# F10 bindings are used by the dandanplay danmaku script when installed.
+# Other mpv defaults are left intact.
