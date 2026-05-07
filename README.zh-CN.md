@@ -17,6 +17,18 @@
 
 ## 使用
 
+如果项目是通过 ZIP 下载或从网络位置复制过来的，Windows 可能会给 `install.ps1` 加上远程文件标记，导致 PowerShell 拒绝直接运行。首次安装前先解除脚本锁定：
+
+```powershell
+Unblock-File .\install.ps1
+```
+
+`jellyfin-mpv-shim-portable/` 里的启动/停止脚本是 `install.ps1` 在本机生成的，正常安装流程下通常不需要额外 unlock。只有当你把已经生成好的 portable 文件夹从另一台电脑、网络共享或下载压缩包里复制过来时，才需要连 portable 里的 PowerShell 脚本一起解除锁定：
+
+```powershell
+Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
+```
+
 ```powershell
 # 完整安装或更新
 .\install.ps1 install

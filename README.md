@@ -17,6 +17,18 @@ After installation, the generated runtime lives under `jellyfin-mpv-shim-portabl
 
 ## Usage
 
+If the project was downloaded as a ZIP or copied from the internet, Windows may mark `install.ps1` as a remote file and PowerShell may refuse to run it. Unblock the script once before installation:
+
+```powershell
+Unblock-File .\install.ps1
+```
+
+The launcher scripts under `jellyfin-mpv-shim-portable/` are generated locally by `install.ps1`, so they normally do not need this. If you copied an already-generated portable folder from another machine or a downloaded archive, unblock the portable PowerShell scripts as well:
+
+```powershell
+Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
+```
+
 ```powershell
 # Full install or update
 .\install.ps1 install
