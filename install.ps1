@@ -1258,6 +1258,24 @@ function Write-LauncherLog {
     Add-Content -Path $LauncherLog -Value "[$timestamp] $Message" -Encoding UTF8
 }
 
+function Test-ShimProcess {
+    param([int]$ProcessId)
+    try {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+        if (-not $proc -or -not $proc.ExecutablePath) { return $false }
+        $actualExe = [System.IO.Path]::GetFullPath($proc.ExecutablePath)
+        $expectedExe = [System.IO.Path]::GetFullPath($PythonExe)
+        $commandLine = [string]$proc.CommandLine
+        return (
+            $actualExe.Equals($expectedExe, [System.StringComparison]::OrdinalIgnoreCase) -and
+            $commandLine.Contains("shim-entry.py") -and
+            $commandLine.Contains($ShimConfigDir)
+        )
+    } catch {
+        return $false
+    }
+}
+
 try {
     if (-not (Test-Path $PythonExe)) { throw "python.exe not found: $PythonExe" }
     if (-not (Test-Path $MpvExe)) { throw "mpv.exe not found: $MpvExe" }
@@ -1268,10 +1286,11 @@ try {
         $oldPidText = Get-Content -Raw -LiteralPath $PidFile -ErrorAction SilentlyContinue
         $oldPid = 0
         if ([int]::TryParse(($oldPidText -as [string]).Trim(), [ref]$oldPid)) {
-            if (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {
+            if (Test-ShimProcess $oldPid) {
                 Write-LauncherLog "jellyfin-mpv-shim already running, PID=$oldPid"
                 exit 0
             }
+            Write-LauncherLog "Removing stale shim PID file, PID=$oldPid is not this portable shim"
         }
         Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
     }
@@ -1293,7 +1312,7 @@ try {
     Write-LauncherLog "Starting shim with config: $ShimConfigDir"
     $proc = Start-Process -FilePath $PythonExe -ArgumentList $argList -WorkingDirectory $PortableDir -RedirectStandardOutput $StdOutLog -RedirectStandardError $StdErrLog -WindowStyle Hidden -PassThru
     Start-Sleep -Seconds 3
-    if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) {
+    if (Test-ShimProcess $proc.Id) {
         Set-Content -LiteralPath $PidFile -Value $proc.Id -Encoding ASCII
         Write-LauncherLog "jellyfin-mpv-shim running, PID=$($proc.Id)"
         exit 0
@@ -1310,6 +1329,7 @@ catch {
     $stopShim = @'
 $ErrorActionPreference = "Stop"
 $PortableDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$PythonExe = Join-Path $PortableDir "python\python.exe"
 $ShimConfigDir = Join-Path $PortableDir "config\jellyfin-mpv-shim"
 $LogDir = Join-Path $PortableDir "config\logs"
 $CacheDir = Join-Path $PortableDir "config\cache"
@@ -1324,9 +1344,27 @@ function Write-LauncherLog {
     Add-Content -Path $LauncherLog -Value "[$timestamp] $Message" -Encoding UTF8
 }
 
+function Test-ShimProcess {
+    param([int]$ProcessId)
+    try {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+        if (-not $proc -or -not $proc.ExecutablePath) { return $false }
+        $actualExe = [System.IO.Path]::GetFullPath($proc.ExecutablePath)
+        $expectedExe = [System.IO.Path]::GetFullPath($PythonExe)
+        $commandLine = [string]$proc.CommandLine
+        return (
+            $actualExe.Equals($expectedExe, [System.StringComparison]::OrdinalIgnoreCase) -and
+            $commandLine.Contains("shim-entry.py") -and
+            $commandLine.Contains($ShimConfigDir)
+        )
+    } catch {
+        return $false
+    }
+}
+
 $pidText = if (Test-Path $PidFile) { Get-Content -Raw -LiteralPath $PidFile -ErrorAction SilentlyContinue } else { "" }
 $procId = 0
-if ([int]::TryParse(($pidText -as [string]).Trim(), [ref]$procId) -and (Get-Process -Id $procId -ErrorAction SilentlyContinue)) {
+if ([int]::TryParse(($pidText -as [string]).Trim(), [ref]$procId) -and (Test-ShimProcess $procId)) {
     Write-LauncherLog "Stopping shim PID=$procId"
     & taskkill.exe /PID $procId /T /F 2>$null | Out-Null
     Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
