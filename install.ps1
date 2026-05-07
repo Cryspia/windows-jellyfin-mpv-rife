@@ -231,6 +231,107 @@ function Initialize-Config {
     }
 }
 
+function Get-NvidiaGpuGeneration {
+    $nvidiaSmi = Get-Command "nvidia-smi.exe" -ErrorAction SilentlyContinue
+    if (-not $nvidiaSmi) {
+        return $null
+    }
+
+    try {
+        $names = & $nvidiaSmi.Source --query-gpu=name --format=csv,noheader 2>$null
+    } catch {
+        return $null
+    }
+
+    $generations = @()
+    foreach ($name in $names) {
+        if ($name -match "RTX\s+([0-9]{2})[0-9]{2}") {
+            $generations += [int]$Matches[1]
+        }
+    }
+    if ($generations.Count -eq 0) {
+        return $null
+    }
+    return ($generations | Measure-Object -Maximum).Maximum
+}
+
+function Set-RifeTensorRtInFile {
+    param(
+        [string]$Path,
+        [bool]$Enabled
+    )
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+    $value = if ($Enabled) { "True" } else { "False" }
+    if ($DryRun) {
+        Write-Host "DRY-RUN: set trt=$value in $Path"
+        return
+    }
+
+    $content = Get-Content -LiteralPath $Path -Raw
+    $updated = $content -replace "trt\s*=\s*(True|False)\s*,", "trt=$value,"
+    if ($updated -ne $content) {
+        Set-Content -LiteralPath $Path -Value $updated -Encoding UTF8
+    }
+}
+
+function Configure-RifeTensorRtForGpu {
+    $generation = Get-NvidiaGpuGeneration
+    if ($null -eq $generation) {
+        Write-Warn "Could not detect NVIDIA GPU generation. Keeping TensorRT enabled for RIFE."
+        return
+    }
+
+    if ($generation -ge 50) {
+        Write-Step "Detected RTX $generation-series / Blackwell GPU; keeping patched mixed-precision TensorRT enabled for RIFE"
+    } else {
+        Write-Step "Detected RTX $generation-series GPU; keeping TensorRT enabled for RIFE"
+    }
+
+    Set-RifeTensorRtInFile (Join-Path $MpvConfigDir "rife-4.26.vpy") $true
+    Set-RifeTensorRtInFile (Join-Path $MpvConfigDir "rife-4.6-light.vpy") $true
+}
+
+function Update-VsrifeTensorRtPrecision {
+    Write-Step "Patching vsrife TensorRT precision policy"
+    $vsrifeInit = Join-Path $PythonDir "Lib\site-packages\vsrife\__init__.py"
+    if (-not (Test-Path $vsrifeInit)) {
+        Write-Warn "vsrife is not installed yet; skipping TensorRT precision patch."
+        return
+    }
+
+    if ($DryRun) {
+        Write-Host "DRY-RUN: patch $vsrifeInit use_explicit_typing=True -> use_explicit_typing=False + enabled_precisions={torch.float16, torch.float32}"
+        return
+    }
+
+    $content = Get-Content -LiteralPath $vsrifeInit -Raw
+    if (($content -match "use_explicit_typing=False,\s*\r?\n\s*enabled_precisions=\{torch\.float16,\s*torch\.float32\}") -and ($content -notmatch "use_explicit_typing=True")) {
+        return
+    }
+
+    $target = "use_explicit_typing=True,"
+    $replacement = "use_explicit_typing=False,`r`n                enabled_precisions={torch.float16, torch.float32},"
+    if ($content.Contains($target)) {
+        $updated = $content.Replace($target, $replacement)
+    } elseif ($content -match "enabled_precisions=\{torch\.float16,\s*torch\.float32\},") {
+        $updated = $content -replace "enabled_precisions=\{torch\.float16,\s*torch\.float32\},", $replacement
+    } else {
+        Write-Warn "Could not find TensorRT precision settings in $vsrifeInit. RIFE TensorRT precision patch was not applied."
+        return
+    }
+
+    Set-Content -LiteralPath $vsrifeInit -Value $updated -Encoding UTF8
+
+    $trtCache = Join-Path $CacheDir "rife-trt"
+    if (Test-Path $trtCache) {
+        Write-Warn "Removing existing RIFE TensorRT engine cache so engines rebuild with mixed precision"
+        Remove-Item -LiteralPath $trtCache -Recurse -Force
+    }
+}
+
 function Install-Python {
     $pythonExe = Join-Path $PythonDir "python.exe"
     if (Test-Path $pythonExe) {
@@ -1543,11 +1644,13 @@ function Install-All {
     Initialize-Layout
     Initialize-Config
     Test-NvidiaVideoSuperResolution
+    Configure-RifeTensorRtForGpu
     Install-Python
     Install-Tkinter
     Install-Mpv
     Install-Ffmpeg
     Install-PythonPackages
+    Update-VsrifeTensorRtPrecision
     Ensure-RifeModels
     Install-Danmaku
     Sync-VcRuntimeDlls

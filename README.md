@@ -81,6 +81,8 @@ vapoursynth(RIFE) -> d3d11vpp(NVIDIA VSR)
 
 Low-fps 1080p content is interpolated first and then passed to driver-level upscaling. High-fps 1080p content uses VSR only. Low-fps content above 1080p uses RIFE only.
 
+RIFE uses TensorRT with a patched mixed-precision policy by default. The installer patches upstream `vsrife` so TensorRT uses `use_explicit_typing=False` plus `enabled_precisions={torch.float16, torch.float32}` instead of `use_explicit_typing=True`; this keeps FP16 throughput while allowing FP32 accumulation where TensorRT needs it, avoiding optical-flow overflow artifacts seen on fast motion and RTX 50-series / Blackwell systems.
+
 ## Keybindings
 
 - `F9` cycles RIFE 4.26 -> RIFE 4.6 light -> off.
@@ -161,3 +163,4 @@ The host must still provide the NVIDIA driver and enabled RTX Video Super Resolu
 - `install.ps1 install` is idempotent and can be rerun to update or patch the portable runtime.
 - Successful installs clean `_downloads` and temporary extraction directories by default. Use `-KeepDownloads` while debugging installer issues.
 - Rerun `install.ps1 install` to sync updates from the upstream danmaku script.
+- If interpolated frames are corrupted after an update, delete `jellyfin-mpv-shim-portable/config/cache/rife-trt/` and rerun `install.ps1 install` so TensorRT engines rebuild with the patched mixed-precision policy.
