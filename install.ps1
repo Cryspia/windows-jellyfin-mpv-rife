@@ -5,7 +5,8 @@ param(
     [switch]$SkipDownloads,
     [switch]$KeepDownloads,
     [switch]$PurgeConfig,
-    [switch]$EnableGlslUpscaleFallback
+    [switch]$EnableGlslUpscaleFallback,
+    [switch]$SkipRifeTrtPrecompile
 )
 
 $ErrorActionPreference = "Stop"
@@ -1520,6 +1521,136 @@ function Configure-VapourSynthPython {
     }
 }
 
+function New-RifePrecompileSample {
+    param(
+        [int]$Width,
+        [int]$Height
+    )
+
+    $ffmpegExe = Join-Path $ToolsDir "ffmpeg.exe"
+    if (-not (Test-Path $ffmpegExe)) {
+        throw "ffmpeg.exe is missing. Run install first."
+    }
+
+    $sampleDir = Join-Path $CacheDir "precompile"
+    Ensure-Directory $sampleDir
+    $samplePath = Join-Path $sampleDir ("rife-precompile-{0}x{1}.mp4" -f $Width, $Height)
+    if (Test-Path $samplePath) {
+        return $samplePath
+    }
+
+    Write-Step ("Generating synthetic RIFE precompile sample {0}x{1}" -f $Width, $Height)
+    if ($DryRun) {
+        Write-Host "DRY-RUN: generate $samplePath"
+        return $samplePath
+    }
+
+    Invoke-Logged $ffmpegExe @(
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        "-f", "lavfi",
+        "-i", ("testsrc2=size={0}x{1}:rate=30:duration=0.2" -f $Width, $Height),
+        "-frames:v", "6",
+        "-an",
+        "-pix_fmt", "yuv420p",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        $samplePath
+    )
+    return $samplePath
+}
+
+function Invoke-MpvRifePrecompile {
+    param(
+        [string]$SamplePath,
+        [string]$VpyName,
+        [string]$Label
+    )
+
+    $mpvCli = Join-Path $MpvDir "mpv.com"
+    if (-not (Test-Path $mpvCli)) {
+        throw "mpv.com is missing. Run install first."
+    }
+
+    Write-Step "Precompiling RIFE TensorRT engine: $Label / $VpyName"
+    if ($DryRun) {
+        Write-Host "DRY-RUN: mpv precompile $Label with $VpyName"
+        return
+    }
+
+    Ensure-Directory $LogsDir
+    $precompileConfigDir = Join-Path $CacheDir "precompile-mpv-config"
+    Ensure-Directory $precompileConfigDir
+    $trtCacheForVpy = (Join-Path $CacheDir "rife-trt").Replace("\", "/")
+    foreach ($name in @("rife-4.26.vpy", "rife-4.6-light.vpy")) {
+        $src = Join-Path $MpvConfigDir $name
+        $dst = Join-Path $precompileConfigDir $name
+        if ((Test-Path $src) -and -not $DryRun) {
+            $vpyContent = Get-Content -LiteralPath $src -Raw
+            $vpyContent = $vpyContent -replace 'trt_cache_dir\s*=\s*Path\(__file__\)\.resolve\(\)\.parents\[1\]\s*/\s*"cache"\s*/\s*"rife-trt"', "trt_cache_dir = Path(r'$trtCacheForVpy')"
+            Set-Content -LiteralPath $dst -Value $vpyContent -Encoding UTF8
+        }
+    }
+    $stdoutPath = Join-Path $LogsDir ("rife-precompile-" + [Guid]::NewGuid().ToString("N") + ".out.log")
+    $stderrPath = Join-Path $LogsDir ("rife-precompile-" + [Guid]::NewGuid().ToString("N") + ".err.log")
+    Set-PortablePythonEnvironment
+    $args = @(
+        "--config-dir=$precompileConfigDir",
+        "--load-scripts=no",
+        "--vo=null",
+        "--ao=null",
+        "--frames=3",
+        "--msg-level=all=v",
+        "--vf=vapoursynth=file=~~/$VpyName",
+        $SamplePath
+    )
+
+    $p = Start-Process -FilePath $mpvCli -ArgumentList $args -WorkingDirectory $ProjectRoot -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    $output = ""
+    if (Test-Path $stdoutPath) {
+        $output += Get-Content -LiteralPath $stdoutPath -Raw
+    }
+    if (Test-Path $stderrPath) {
+        $output += Get-Content -LiteralPath $stderrPath -Raw
+    }
+    if (($p.ExitCode -ne 0) -or ($output -match "Script evaluation failed|Disabling filter vapoursynth|could not init VS")) {
+        Write-Warn "RIFE TensorRT precompile failed. Logs kept for inspection:"
+        Write-Warn $stdoutPath
+        Write-Warn $stderrPath
+        throw "RIFE TensorRT precompile failed for $Label / $VpyName"
+    }
+
+    Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+}
+
+function Precompile-RifeTensorRtEngines {
+    if ($SkipRifeTrtPrecompile) {
+        Write-Step "Skipping RIFE TensorRT precompile"
+        return
+    }
+
+    Write-Step "Precompiling common RIFE TensorRT engines"
+    Remove-Item -LiteralPath (Join-Path $CacheDir "cache") -Recurse -Force -ErrorAction SilentlyContinue
+    $resolutions = @(
+        @{ Label = "720p"; Width = 1280; Height = 720 },
+        @{ Label = "1080p"; Width = 1920; Height = 1080 },
+        @{ Label = "4K"; Width = 3840; Height = 2160 }
+    )
+
+    $vpyFiles = @(
+        "rife-4.26.vpy",
+        "rife-4.6-light.vpy"
+    )
+    foreach ($resolution in $resolutions) {
+        $sample = New-RifePrecompileSample $resolution.Width $resolution.Height
+        foreach ($vpy in $vpyFiles) {
+            Invoke-MpvRifePrecompile $sample $vpy $resolution.Label
+        }
+    }
+}
+
 function Set-PortablePythonEnvironment {
     $pythonExe = Join-Path $PythonDir "python.exe"
     if (Test-Path $pythonExe) {
@@ -1656,6 +1787,7 @@ function Install-All {
     Sync-VcRuntimeDlls
     Remove-StaleMpvVapourSynthDlls
     Configure-VapourSynthPython
+    Precompile-RifeTensorRtEngines
     Update-ShimGuiForPortable
     Update-ShimPlayerForPortable
     Update-ShimActionThreadForRobustness

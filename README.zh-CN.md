@@ -33,6 +33,9 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 # 完整安装或更新
 .\install.ps1 install
 
+# 更快安装，但首次播放可能会等待 TensorRT 编译 engine
+.\install.ps1 install -SkipRifeTrtPrecompile
+
 # 查看状态
 .\install.ps1 status
 
@@ -82,6 +85,8 @@ vapoursynth(RIFE) -> d3d11vpp(NVIDIA VSR)
 也就是说，低帧率 1080p 内容会先插帧再交给 NVIDIA 驱动级超分；高帧率 1080p 内容只做超分；高于 1080p 的低帧率内容只做插帧。
 
 RIFE 默认使用经过 patch 的 TensorRT 混合精度策略。安装器会 patch 上游 `vsrife`，把 TensorRT 编译参数从 `use_explicit_typing=True` 改成 `use_explicit_typing=False` 加 `enabled_precisions={torch.float16, torch.float32}`；这样保留 FP16 吞吐，同时允许 TensorRT 在需要的位置使用 FP32 累加，避免快速运动和 RTX 50 系 / Blackwell 环境下可能出现的光流溢出花帧。
+
+安装时脚本还会用两套内置 RIFE 配置预编译常见 720p、1080p 和 4K TensorRT engine，避免第一次播放时长时间编译导致用户误以为卡死。4K engine 即使在高端显卡上也可能需要数分钟编译；如果想缩短安装时间并接受首次播放时编译，可使用 `-SkipRifeTrtPrecompile`。
 
 ## 按键
 

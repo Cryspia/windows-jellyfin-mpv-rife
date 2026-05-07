@@ -33,6 +33,9 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 # Full install or update
 .\install.ps1 install
 
+# Faster install, but first playback may pause while TensorRT builds engines
+.\install.ps1 install -SkipRifeTrtPrecompile
+
 # Status
 .\install.ps1 status
 
@@ -82,6 +85,8 @@ vapoursynth(RIFE) -> d3d11vpp(NVIDIA VSR)
 Low-fps 1080p content is interpolated first and then passed to driver-level upscaling. High-fps 1080p content uses VSR only. Low-fps content above 1080p uses RIFE only.
 
 RIFE uses TensorRT with a patched mixed-precision policy by default. The installer patches upstream `vsrife` so TensorRT uses `use_explicit_typing=False` plus `enabled_precisions={torch.float16, torch.float32}` instead of `use_explicit_typing=True`; this keeps FP16 throughput while allowing FP32 accumulation where TensorRT needs it, avoiding optical-flow overflow artifacts seen on fast motion and RTX 50-series / Blackwell systems.
+
+During installation, the script also precompiles common RIFE TensorRT engines for 720p, 1080p, and 4K with both bundled RIFE profiles. This avoids the long first-playback TensorRT build pause. 4K engine builds can take several minutes even on high-end GPUs; use `-SkipRifeTrtPrecompile` when you need a faster install and accept the first-playback compile delay.
 
 ## Keybindings
 
