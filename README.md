@@ -104,7 +104,7 @@ On Windows, the default upscaler is NVIDIA's driver-level D3D11 Video Processor 
 d3d11vpp=scale=...:scaling-mode=nvidia
 ```
 
-`config/mpv/scripts/autovsr.lua` appends the `@vsr:d3d11vpp` filter at runtime when the source resolution is at or below 1080p. When VSR is active, `Shift+i 2` should show a `d3d11vpp` pass, and NVIDIA App's RTX Video Enhancement status should become active.
+`config/mpv/scripts/autovsr.lua` appends the `@vsr:d3d11vpp` filter at runtime when the source resolution is at or below 1080p. The VSR scale is computed from the actual aspect-preserving render fit with `min(display_width/source_width, display_height/source_height)`, so ultrawide, 16:10, portrait, and other non-16:9 screens do not count letterbox or pillarbox space as part of the upscale target. On multi-monitor setups, set `VSR_TARGET_W` and `VSR_TARGET_H` to override the detected target size. When VSR is active, `Shift+i 2` should show a `d3d11vpp` pass, and NVIDIA App's RTX Video Enhancement status should become active.
 
 If the installer cannot confirm the registry state for NVIDIA VSR, it warns you to check NVIDIA App / Control Panel. It does not silently fall back to GLSL upscaling. `-EnableGlslUpscaleFallback` exists only for manual debugging.
 

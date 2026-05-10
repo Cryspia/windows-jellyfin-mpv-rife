@@ -104,7 +104,7 @@ Windows 下不使用 GLSL 超分作为默认方案，而是使用 NVIDIA 驱动�
 d3d11vpp=scale=...:scaling-mode=nvidia
 ```
 
-`config/mpv/scripts/autovsr.lua` 会在运行时根据源分辨率追加 `@vsr:d3d11vpp` 滤镜。VSR 生效时，`Shift+i 2` 能看到 `d3d11vpp` pass，NVIDIA App 的 RTX Video Enhancement 状态也应从 inactive 变为 active。
+`config/mpv/scripts/autovsr.lua` 会在运行时根据源分辨率追加 `@vsr:d3d11vpp` 滤镜。VSR 倍率按实际显示区域计算：使用 `min(display_width/source_width, display_height/source_height)`，因此在 21:9、16:10、竖屏等异形屏上会按视频实际能填满的限制轴选择倍率，而不会把黑边区域也算进超分目标。多屏环境检测到错误显示器时，可用 `VSR_TARGET_W` 和 `VSR_TARGET_H` 环境变量覆盖目标尺寸。VSR 生效时，`Shift+i 2` 能看到 `d3d11vpp` pass，NVIDIA App 的 RTX Video Enhancement 状态也应从 inactive 变为 active。
 
 如果安装器不能确认系统 VSR 注册表状态，只会提示你检查 NVIDIA App / Control Panel，不会静默 fallback 到 mpv GLSL shader。`-EnableGlslUpscaleFallback` 只保留给手动调试。
 
