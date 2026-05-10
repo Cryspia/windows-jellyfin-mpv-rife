@@ -36,6 +36,9 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 # Faster install, but first playback may pause while TensorRT builds engines
 .\install.ps1 install -SkipRifeTrtPrecompile
 
+# Benchmark local RIFE capability and write tier defaults to runtime.conf
+.\install.ps1 install -BenchmarkRifeRuntime
+
 # Status
 .\install.ps1 status
 
@@ -71,8 +74,8 @@ Generated launchers:
 
 | Condition | RIFE | NVIDIA VSR |
 |---|---|---|
-| Source fps < 60 | enabled, default RIFE 4.26 scale=1.0 | independent |
-| Source fps >= 60 | disabled | independent |
+| Source fps <= 60 | enabled with x2/x3/x4 selected by refresh rate and local capability, default RIFE 4.26 scale=1.0 | independent |
+| Source fps > 60 | disabled | independent |
 | Source resolution <= 1920x1080 | independent | enabled via NVIDIA d3d11vpp VSR |
 | Source resolution > 1920x1080 | independent | disabled |
 
@@ -82,15 +85,17 @@ The effective mpv filter order is:
 vapoursynth(RIFE) -> d3d11vpp(NVIDIA VSR)
 ```
 
-Low-fps 1080p content is interpolated first and then passed to driver-level upscaling. High-fps 1080p content uses VSR only. Low-fps content above 1080p uses RIFE only.
+Low-fps 1080p content is interpolated first and then passed to driver-level upscaling. High-fps 1080p content uses VSR only. Low-fps content above 1080p uses RIFE only. RIFE picks the highest factor that does not exceed the display refresh rate, up to x4; for example, 24fps caps at x2 on 60Hz and x4 on 120Hz.
 
 RIFE uses TensorRT with a patched mixed-precision policy by default. The installer patches upstream `vsrife` so TensorRT uses `use_explicit_typing=False` plus `enabled_precisions={torch.float16, torch.float32}` instead of `use_explicit_typing=True`; this keeps FP16 throughput while allowing FP32 accumulation where TensorRT needs it, avoiding optical-flow overflow artifacts seen on fast motion and RTX 50-series / Blackwell systems.
 
 During installation, the script also precompiles common RIFE TensorRT engines for 720p, 1080p, and 4K with both bundled RIFE profiles. This avoids the long first-playback TensorRT build pause. 4K engine builds can take several minutes even on high-end GPUs; use `-SkipRifeTrtPrecompile` when you need a faster install and accept the first-playback compile delay.
 
+`config/mpv/runtime.conf` controls runtime policy. Set `display_refresh`, `vsr_target_w`, and `vsr_target_h` there to pin refresh rate and VSR target size on multi-monitor systems. The default local capability caps are `max_factor_720`, `max_factor_1080`, and `max_factor_4k`; with `-BenchmarkRifeRuntime`, the installer tests 720p/1080p/4K 24fps synthetic clips at x4/x3/x2, warms and reuses TRT cache, and writes the highest p99-safe factor for each tier.
+
 ## Keybindings
 
-- `F9` cycles RIFE 4.26 -> RIFE 4.6 light -> off.
+- `F9` cycles the RIFE cap x4 -> x3 -> x2 -> off; the effective factor is still limited by display refresh and `runtime.conf` capability caps.
 - `F10` toggles danmaku visibility.
 - `Shift+F10` opens the danmaku settings panel.
 - `Ctrl+F10` opens manual danmaku search.
@@ -104,7 +109,7 @@ On Windows, the default upscaler is NVIDIA's driver-level D3D11 Video Processor 
 d3d11vpp=scale=...:scaling-mode=nvidia
 ```
 
-`config/mpv/scripts/autovsr.lua` appends the `@vsr:d3d11vpp` filter at runtime when the source resolution is at or below 1080p. The VSR scale is computed from the actual aspect-preserving render fit with `min(display_width/source_width, display_height/source_height)`, so ultrawide, 16:10, portrait, and other non-16:9 screens do not count letterbox or pillarbox space as part of the upscale target. On multi-monitor setups, set `VSR_TARGET_W` and `VSR_TARGET_H` to override the detected target size. When VSR is active, `Shift+i 2` should show a `d3d11vpp` pass, and NVIDIA App's RTX Video Enhancement status should become active.
+`config/mpv/scripts/autovsr.lua` appends the `@vsr:d3d11vpp` filter at runtime when the source resolution is at or below 1080p. The VSR scale is computed from the actual aspect-preserving render fit with `min(display_width/source_width, display_height/source_height)`, so ultrawide, 16:10, portrait, and other non-16:9 screens do not count letterbox or pillarbox space as part of the upscale target. On multi-monitor setups, set `vsr_target_w` and `vsr_target_h` in `config/mpv/runtime.conf` to override the detected target size. When VSR is active, `Shift+i 2` should show a `d3d11vpp` pass, and NVIDIA App's RTX Video Enhancement status should become active.
 
 If the installer cannot confirm the registry state for NVIDIA VSR, it warns you to check NVIDIA App / Control Panel. It does not silently fall back to GLSL upscaling. `-EnableGlslUpscaleFallback` exists only for manual debugging.
 
@@ -137,8 +142,10 @@ windows-jellyfin-mpv-rife/
 │   ├── examples/
 │   │   ├── mpv.conf.example
 │   │   ├── input.conf.example
+│   │   ├── runtime.conf.example
 │   │   ├── rife-4.26.vpy.example
 │   │   ├── rife-4.6-light.vpy.example
+│   │   ├── autorife.lua.example
 │   │   ├── autovsr.lua.example
 │   │   └── shim-conf.json.example
 │   └── shaders/
@@ -152,7 +159,7 @@ Generated portable layout:
 | `python/` | portable CPython, pip packages, Tk, VapourSynth, Torch, TensorRT, RIFE |
 | `mpv/` | portable mpv |
 | `tools/` | ffmpeg / ffprobe |
-| `config/mpv/` | mpv config, RIFE vpy files, autovsr, danmaku script |
+| `config/mpv/` | mpv config, runtime.conf, RIFE vpy files, autorife/autovsr, danmaku script |
 | `config/jellyfin-mpv-shim/` | shim config and server credentials |
 | `config/logs/` | shim and mpv logs |
 | `config/cache/` | PID file, danmaku cache, temporary check scripts |

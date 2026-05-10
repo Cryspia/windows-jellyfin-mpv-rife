@@ -4,6 +4,19 @@ local msg = require("mp.msg")
 local applying = false
 local last_scale = nil
 
+local function current_script_dir()
+    local ok, dir = pcall(mp.get_script_directory)
+    if dir then return dir end
+    local source = debug.getinfo(1, "S").source
+    if source and source:sub(1, 1) == "@" then
+        return source:match("^(.*)[/\\][^/\\]+$")
+    end
+    return "."
+end
+
+local script_dir = current_script_dir()
+local config_dir = require("mp.utils").join_path(script_dir, "..")
+
 local function has_vsr(vf)
     return vf and string.find(vf, "@vsr", 1, true) ~= nil
 end
@@ -12,7 +25,35 @@ local function supported_format(fmt)
     return fmt == "nv12" or fmt == "p010" or fmt == "yuv420p" or fmt == "yuv420p10"
 end
 
+local function read_runtime_conf()
+    local conf = {}
+    local path = mp.find_config_file("runtime.conf") or require("mp.utils").join_path(config_dir, "runtime.conf")
+    if not path then
+        return conf
+    end
+
+    local f = io.open(path, "r")
+    if not f then
+        return conf
+    end
+    for line in f:lines() do
+        local key, value = line:match("^%s*([%w_%-]+)%s*=%s*(.-)%s*$")
+        if key and not key:match("^#") then
+            conf[key] = value
+        end
+    end
+    f:close()
+    return conf
+end
+
 local function read_target_dims()
+    local conf = read_runtime_conf()
+    local cw = tonumber(conf.vsr_target_w or "")
+    local ch = tonumber(conf.vsr_target_h or "")
+    if cw and ch and cw > 0 and ch > 0 then
+        return cw, ch
+    end
+
     local w = tonumber(os.getenv("VSR_TARGET_W") or "")
     local h = tonumber(os.getenv("VSR_TARGET_H") or "")
     if w and h and w > 0 and h > 0 then

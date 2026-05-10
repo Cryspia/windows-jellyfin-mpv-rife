@@ -36,6 +36,9 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 # 更快安装，但首次播放可能会等待 TensorRT 编译 engine
 .\install.ps1 install -SkipRifeTrtPrecompile
 
+# 安装时测试本机 RIFE 能力，并把三档默认倍率写入 runtime.conf
+.\install.ps1 install -BenchmarkRifeRuntime
+
 # 查看状态
 .\install.ps1 status
 
@@ -71,8 +74,8 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 
 | 条件 | RIFE 插帧 | NVIDIA VSR |
 |---|---|---|
-| 源帧率 < 60 fps | 开启，默认 RIFE 4.26 scale=1.0 | 独立判断 |
-| 源帧率 >= 60 fps | 关闭 | 独立判断 |
+| 源帧率 <= 60 fps | 按刷新率和本机能力选择 x2/x3/x4，默认 RIFE 4.26 scale=1.0 | 独立判断 |
+| 源帧率 > 60 fps | 关闭 | 独立判断 |
 | 源分辨率 <= 1920x1080 | 独立判断 | 开启 NVIDIA d3d11vpp VSR |
 | 源分辨率 > 1920x1080 | 独立判断 | 关闭 |
 
@@ -82,15 +85,17 @@ mpv 的实际滤镜顺序是：
 vapoursynth(RIFE) -> d3d11vpp(NVIDIA VSR)
 ```
 
-也就是说，低帧率 1080p 内容会先插帧再交给 NVIDIA 驱动级超分；高帧率 1080p 内容只做超分；高于 1080p 的低帧率内容只做插帧。
+也就是说，低帧率 1080p 内容会先插帧再交给 NVIDIA 驱动级超分；高帧率 1080p 内容只做超分；高于 1080p 的低帧率内容只做插帧。RIFE 会在“不超过显示器刷新率”的前提下选择最高倍率，最高 x4；例如 24fps 在 60Hz 下最多 x2，在 120Hz 下最多 x4。
 
 RIFE 默认使用经过 patch 的 TensorRT 混合精度策略。安装器会 patch 上游 `vsrife`，把 TensorRT 编译参数从 `use_explicit_typing=True` 改成 `use_explicit_typing=False` 加 `enabled_precisions={torch.float16, torch.float32}`；这样保留 FP16 吞吐，同时允许 TensorRT 在需要的位置使用 FP32 累加，避免快速运动和 RTX 50 系 / Blackwell 环境下可能出现的光流溢出花帧。
 
 安装时脚本还会用两套内置 RIFE 配置预编译常见 720p、1080p 和 4K TensorRT engine，避免第一次播放时长时间编译导致用户误以为卡死。4K engine 即使在高端显卡上也可能需要数分钟编译；如果想缩短安装时间并接受首次播放时编译，可使用 `-SkipRifeTrtPrecompile`。
 
+`config/mpv/runtime.conf` 控制运行时策略。可在其中手动设置 `display_refresh`、`vsr_target_w`、`vsr_target_h`，用于多显示器环境下固定刷新率和 VSR 目标尺寸。默认三档能力上限是 `max_factor_720`、`max_factor_1080`、`max_factor_4k`；使用 `-BenchmarkRifeRuntime` 安装时，脚本会用 720p/1080p/4K 的 24fps 合成样片测试 x4/x3/x2，预热并复用 TRT cache 后按 p99 帧时间是否满足预算写回这三档。
+
 ## 按键
 
-- `F9`：循环 RIFE 4.26 -> RIFE 4.6 light -> 关闭。
+- `F9`：循环 RIFE 上限 x4 -> x3 -> x2 -> 关闭；实际倍率仍受显示刷新率和 `runtime.conf` 能力上限限制。
 - `F10`：弹幕显示开关。
 - `Shift+F10`：弹幕设置面板。
 - `Ctrl+F10`：手动搜索弹幕。
@@ -104,7 +109,7 @@ Windows 下不使用 GLSL 超分作为默认方案，而是使用 NVIDIA 驱动�
 d3d11vpp=scale=...:scaling-mode=nvidia
 ```
 
-`config/mpv/scripts/autovsr.lua` 会在运行时根据源分辨率追加 `@vsr:d3d11vpp` 滤镜。VSR 倍率按实际显示区域计算：使用 `min(display_width/source_width, display_height/source_height)`，因此在 21:9、16:10、竖屏等异形屏上会按视频实际能填满的限制轴选择倍率，而不会把黑边区域也算进超分目标。多屏环境检测到错误显示器时，可用 `VSR_TARGET_W` 和 `VSR_TARGET_H` 环境变量覆盖目标尺寸。VSR 生效时，`Shift+i 2` 能看到 `d3d11vpp` pass，NVIDIA App 的 RTX Video Enhancement 状态也应从 inactive 变为 active。
+`config/mpv/scripts/autovsr.lua` 会在运行时根据源分辨率追加 `@vsr:d3d11vpp` 滤镜。VSR 倍率按实际显示区域计算：使用 `min(display_width/source_width, display_height/source_height)`，因此在 21:9、16:10、竖屏等异形屏上会按视频实际能填满的限制轴选择倍率，而不会把黑边区域也算进超分目标。多屏环境检测到错误显示器时，可在 `config/mpv/runtime.conf` 里设置 `vsr_target_w` 和 `vsr_target_h` 覆盖目标尺寸。VSR 生效时，`Shift+i 2` 能看到 `d3d11vpp` pass，NVIDIA App 的 RTX Video Enhancement 状态也应从 inactive 变为 active。
 
 如果安装器不能确认系统 VSR 注册表状态，只会提示你检查 NVIDIA App / Control Panel，不会静默 fallback 到 mpv GLSL shader。`-EnableGlslUpscaleFallback` 只保留给手动调试。
 
@@ -137,8 +142,10 @@ windows-jellyfin-mpv-rife/
 │   ├── examples/
 │   │   ├── mpv.conf.example
 │   │   ├── input.conf.example
+│   │   ├── runtime.conf.example
 │   │   ├── rife-4.26.vpy.example
 │   │   ├── rife-4.6-light.vpy.example
+│   │   ├── autorife.lua.example
 │   │   ├── autovsr.lua.example
 │   │   └── shim-conf.json.example
 │   └── shaders/
@@ -152,7 +159,7 @@ windows-jellyfin-mpv-rife/
 | `python/` | portable CPython、pip 包、Tk、VapourSynth、Torch、TensorRT、RIFE |
 | `mpv/` | portable mpv |
 | `tools/` | ffmpeg / ffprobe |
-| `config/mpv/` | mpv 配置、RIFE vpy、autovsr、弹幕脚本 |
+| `config/mpv/` | mpv 配置、runtime.conf、RIFE vpy、autorife/autovsr、弹幕脚本 |
 | `config/jellyfin-mpv-shim/` | shim 配置和服务器凭据 |
 | `config/logs/` | shim 和 mpv 日志 |
 | `config/cache/` | PID、弹幕缓存和临时检测脚本 |

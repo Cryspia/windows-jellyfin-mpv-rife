@@ -1,0 +1,153 @@
+local mp = require("mp")
+local msg = require("mp.msg")
+local utils = require("mp.utils")
+
+local applying = false
+local manual_caps = { 4, 3, 2, 0 }
+local manual_index = 1
+local active_factor = 0
+
+local function current_script_dir()
+    local ok, dir = pcall(mp.get_script_directory)
+    if dir then return dir end
+    local source = debug.getinfo(1, "S").source
+    if source and source:sub(1, 1) == "@" then
+        return source:match("^(.*)[/\\][^/\\]+$")
+    end
+    return "."
+end
+
+local script_dir = current_script_dir()
+local config_dir = utils.join_path(script_dir, "..")
+
+local function has_rife(vf)
+    return vf and string.find(vf, "@rife", 1, true) ~= nil
+end
+
+local function has_vsr(vf)
+    return vf and string.find(vf, "@vsr", 1, true) ~= nil
+end
+
+local function read_runtime_conf()
+    local conf = {}
+    local path = mp.find_config_file("runtime.conf") or utils.join_path(config_dir, "runtime.conf")
+    if not path then
+        return conf
+    end
+
+    local f = io.open(path, "r")
+    if not f then
+        return conf
+    end
+    for line in f:lines() do
+        local key, value = line:match("^%s*([%w_%-]+)%s*=%s*(.-)%s*$")
+        if key and not key:match("^#") then
+            conf[key] = value
+        end
+    end
+    f:close()
+    return conf
+end
+
+local function number_or_nil(value)
+    local n = tonumber(value or "")
+    if n and n > 0 then
+        return n
+    end
+    return nil
+end
+
+local function clamp_factor(value)
+    local n = math.floor(tonumber(value or "") or 4)
+    if n > 4 then return 4 end
+    if n < 0 then return 0 end
+    return n
+end
+
+local function source_tier_max(conf, height)
+    if height <= 720 then
+        return clamp_factor(conf.max_factor_720)
+    elseif height <= 1080 then
+        return clamp_factor(conf.max_factor_1080)
+    end
+    return clamp_factor(conf.max_factor_4k)
+end
+
+local function display_refresh(conf)
+    return number_or_nil(conf.display_refresh) or number_or_nil(os.getenv("RIFE_DISPLAY_REFRESH")) or mp.get_property_native("display-fps") or 60
+end
+
+local function choose_factor(conf)
+    local fps = mp.get_property_native("container-fps") or mp.get_property_native("estimated-vf-fps")
+    local height = mp.get_property_native("height")
+    if not fps or not height or fps <= 0 then
+        return 0, "missing source fps/height"
+    end
+    if fps > 60.0001 then
+        return 0, string.format("source %.3ffps > 60fps", fps)
+    end
+
+    local cap = manual_caps[manual_index]
+    if cap <= 0 then
+        return 0, "manual off"
+    end
+
+    local refresh = display_refresh(conf)
+    local refresh_cap = math.floor((refresh + 0.01) / fps)
+    local tier_cap = source_tier_max(conf, height)
+    local factor = math.min(4, cap, tier_cap, refresh_cap)
+    if factor < 2 then
+        return 0, string.format("refresh %.3fHz cannot fit %.3ffps x2", refresh, fps)
+    end
+    return factor, string.format("fps %.3f, refresh %.3fHz, caps manual=%d tier=%d", fps, refresh, cap, tier_cap)
+end
+
+local function apply()
+    if applying then return end
+    local conf = read_runtime_conf()
+    local factor, reason = choose_factor(conf)
+    local vf = mp.get_property("vf") or ""
+
+    if active_factor == factor and ((factor == 0 and not has_rife(vf)) or (factor > 0 and has_rife(vf))) then
+        return
+    end
+
+    applying = true
+    if has_vsr(vf) then
+        mp.commandv("vf", "remove", "@vsr")
+    end
+    if has_rife(vf) then
+        mp.commandv("vf", "remove", "@rife")
+    end
+
+    if factor > 0 then
+        local script_name = string.format("rife-4.26-x%d.vpy", factor)
+        local script_path = mp.find_config_file(script_name) or utils.join_path(config_dir, script_name)
+        mp.commandv("vf", "append", "@rife:vapoursynth=file=" .. script_path)
+        msg.info(string.format("RIFE: x%d enabled (%s)", factor, reason))
+        mp.osd_message(string.format("RIFE: x%d", factor), 1.5)
+    else
+        msg.info("RIFE: disabled (" .. reason .. ")")
+        mp.osd_message("RIFE: off", 1.5)
+    end
+    active_factor = factor
+    applying = false
+end
+
+local function cycle_manual_cap()
+    manual_index = manual_index + 1
+    if manual_index > #manual_caps then
+        manual_index = 1
+    end
+    active_factor = nil
+    apply()
+end
+
+mp.add_key_binding("F9", "cycle-rife-factor", cycle_manual_cap)
+mp.observe_property("width", "native", apply)
+mp.observe_property("height", "native", apply)
+mp.observe_property("container-fps", "native", apply)
+mp.observe_property("estimated-vf-fps", "native", apply)
+mp.observe_property("display-fps", "native", apply)
+mp.observe_property("vf", "native", apply)
+mp.register_event("file-loaded", apply)

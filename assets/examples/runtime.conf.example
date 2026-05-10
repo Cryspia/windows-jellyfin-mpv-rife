@@ -1,0 +1,16 @@
+# Runtime policy shared by autorife.lua and autovsr.lua.
+# Empty display values use mpv auto-detection.
+
+# Manual display refresh override in Hz. Leave empty to use display-fps, then 60.
+display_refresh=
+
+# Manual VSR target size override. Useful when mpv detects the wrong monitor.
+vsr_target_w=
+vsr_target_h=
+
+# Maximum RIFE factor allowed by local GPU capability per source-height tier.
+# The effective factor is still capped by display_refresh / source_fps.
+max_factor_720=4
+max_factor_1080=4
+max_factor_4k=4
+

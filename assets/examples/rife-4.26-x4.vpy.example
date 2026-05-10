@@ -1,0 +1,29 @@
+import vapoursynth as vs
+from vsrife import rife
+from pathlib import Path
+
+core = vs.core
+clip = video_in
+trt_cache_dir = Path(__file__).resolve().parents[1] / "cache" / "rife-trt"
+trt_cache_dir.mkdir(parents=True, exist_ok=True)
+
+_MATRIX_NAME = {1: "709", 6: "170m", 7: "240m", 9: "2020ncl"}
+try:
+    _m = int(clip.get_frame(0).props.get("_Matrix", 1))
+except Exception:
+    _m = 1
+_mtx = _MATRIX_NAME.get(_m, "709")
+
+clip = core.resize.Bicubic(clip, format=vs.RGBH, matrix_in_s=_mtx)
+clip = rife(
+    clip,
+    model="4.26",
+    scale=1.0,
+    factor_num=4,
+    factor_den=1,
+    auto_download=False,
+    trt=True,
+    trt_cache_dir=str(trt_cache_dir),
+)
+clip = core.resize.Bicubic(clip, format=vs.YUV420P10, matrix_s=_mtx)
+clip.set_output()

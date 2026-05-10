@@ -24,16 +24,7 @@ dither-depth=auto
 secondary-sub-ass-override=no
 secondary-sub-pos=0
 
-# Windows default: scripts/autovsr.lua appends @vsr:d3d11vpp after any RIFE vf.
+# Windows default: scripts/autorife.lua manages RIFE and scripts/autovsr.lua
+# appends @vsr:d3d11vpp after any RIFE vf.
 # Do not load GLSL upscalers by default. If NVIDIA VSR is off, enable it in
 # NVIDIA App / Control Panel instead of silently falling back to shader upscale.
-
-[rife-4k60-heavy]
-profile-cond=(p["container-fps"] or 999)<60
-profile-restore=copy-equal
-vf=vapoursynth=file=~~/rife-4.26.vpy
-
-[no-rife-high-fps-or-large]
-profile-cond=(p["container-fps"] or 0)>=60
-profile-restore=copy-equal
-vf=

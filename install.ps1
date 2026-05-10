@@ -6,7 +6,8 @@ param(
     [switch]$KeepDownloads,
     [switch]$PurgeConfig,
     [switch]$EnableGlslUpscaleFallback,
-    [switch]$SkipRifeTrtPrecompile
+    [switch]$SkipRifeTrtPrecompile,
+    [switch]$BenchmarkRifeRuntime
 )
 
 $ErrorActionPreference = "Stop"
@@ -218,10 +219,22 @@ function Initialize-Config {
     Write-Step "Initializing persistent config inside portable"
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "mpv.conf.example") (Join-Path $MpvConfigDir "mpv.conf")
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "input.conf.example") (Join-Path $MpvConfigDir "input.conf")
+    Copy-ExampleIfMissing (Join-Path $ExamplesDir "runtime.conf.example") (Join-Path $MpvConfigDir "runtime.conf")
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "rife-4.26.vpy.example") (Join-Path $MpvConfigDir "rife-4.26.vpy")
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "rife-4.6-light.vpy.example") (Join-Path $MpvConfigDir "rife-4.6-light.vpy")
+    foreach ($name in @(
+        "rife-4.26-x2.vpy",
+        "rife-4.26-x3.vpy",
+        "rife-4.26-x4.vpy",
+        "rife-4.6-light-x2.vpy",
+        "rife-4.6-light-x3.vpy",
+        "rife-4.6-light-x4.vpy"
+    )) {
+        Copy-ExampleIfMissing (Join-Path $ExamplesDir "$name.example") (Join-Path $MpvConfigDir $name)
+    }
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "shim-conf.json.example") (Join-Path $ShimConfigDir "conf.json")
     Ensure-Directory (Join-Path $MpvConfigDir "scripts")
+    Copy-Item -LiteralPath (Join-Path $ExamplesDir "autorife.lua.example") -Destination (Join-Path $MpvConfigDir "scripts\autorife.lua") -Force
     Copy-Item -LiteralPath (Join-Path $ExamplesDir "autovsr.lua.example") -Destination (Join-Path $MpvConfigDir "scripts\autovsr.lua") -Force
 
     $shaderSource = Join-Path $AssetsDir "shaders\FSRCNNX_x2_8-0-4-1.glsl"
@@ -229,6 +242,37 @@ function Initialize-Config {
     if ((Test-Path $shaderSource) -and $EnableGlslUpscaleFallback) {
         Ensure-Directory $shaderTargetDir
         Copy-ExampleIfMissing $shaderSource (Join-Path $shaderTargetDir "FSRCNNX_x2_8-0-4-1.glsl")
+    }
+}
+
+function Update-MpvRuntimePolicyConfig {
+    $mpvConf = Join-Path $MpvConfigDir "mpv.conf"
+    if (Test-Path $mpvConf) {
+        if ($DryRun) {
+            Write-Host "DRY-RUN: remove legacy RIFE auto profiles from $mpvConf"
+        } else {
+            $content = Get-Content -LiteralPath $mpvConf -Raw
+            $content = $content -replace '(?ms)\r?\n?\[rife-4k60-heavy\]\s*.*?(?=\r?\n\[no-rife-high-fps-or-large\])', ''
+            $content = $content -replace '(?ms)\r?\n?\[no-rife-high-fps-or-large\]\s*.*?(?=\r?\n\[|\z)', ''
+            $content = $content -replace '(?m)^# Windows default:.*(?:autorife\.lua|autovsr\.lua).*$',
+                '# Windows default: scripts/autorife.lua manages RIFE and scripts/autovsr.lua appends @vsr:d3d11vpp after any RIFE vf.'
+            Set-Content -LiteralPath $mpvConf -Value $content.TrimEnd() -Encoding UTF8
+        }
+    }
+
+    $inputConf = Join-Path $MpvConfigDir "input.conf"
+    if (Test-Path $inputConf) {
+        if ($DryRun) {
+            Write-Host "DRY-RUN: remove legacy F9 vf cycle from $inputConf"
+        } else {
+            $content = Get-Content -LiteralPath $inputConf -Raw
+            $content = $content -replace '(?m)^F9\s+cycle-values\s+vf.*\r?\n?', ''
+            $content = $content -replace '(?m)^# F9 cycles RIFE modes manually:.*\r?\n?', ''
+            if ($content -notmatch 'autorife\.lua') {
+                $content = "# F9 is handled by scripts/autorife.lua: x4 -> x3 -> x2 -> off.`r`n" + $content
+            }
+            Set-Content -LiteralPath $inputConf -Value $content.TrimEnd() -Encoding UTF8
+        }
     }
 }
 
@@ -291,8 +335,18 @@ function Configure-RifeTensorRtForGpu {
         Write-Step "Detected RTX $generation-series GPU; keeping TensorRT enabled for RIFE"
     }
 
-    Set-RifeTensorRtInFile (Join-Path $MpvConfigDir "rife-4.26.vpy") $true
-    Set-RifeTensorRtInFile (Join-Path $MpvConfigDir "rife-4.6-light.vpy") $true
+    foreach ($name in @(
+        "rife-4.26.vpy",
+        "rife-4.26-x2.vpy",
+        "rife-4.26-x3.vpy",
+        "rife-4.26-x4.vpy",
+        "rife-4.6-light.vpy",
+        "rife-4.6-light-x2.vpy",
+        "rife-4.6-light-x3.vpy",
+        "rife-4.6-light-x4.vpy"
+    )) {
+        Set-RifeTensorRtInFile (Join-Path $MpvConfigDir $name) $true
+    }
 }
 
 function Update-VsrifeTensorRtPrecision {
@@ -703,7 +757,15 @@ function Install-Danmaku {
         Write-Step "Danmaku script already exists; -SkipDownloads set and no cached upstream zip found"
         return
     }
-    Download-File $DanmakuZipUrl $zip
+    try {
+        Download-File $DanmakuZipUrl $zip
+    } catch {
+        if (Test-Path (Join-Path $target "main.lua")) {
+            Write-Warn "Could not update danmaku script from upstream; keeping existing installed copy. $($_.Exception.Message)"
+            return
+        }
+        throw
+    }
     $tmp = Join-Path $PortableDir "_danmaku_extract"
     if ((Test-Path $tmp) -and -not $DryRun) {
         Remove-Item -Path $tmp -Recurse -Force
@@ -1621,7 +1683,16 @@ function Invoke-MpvRifePrecompile {
     $precompileConfigDir = Join-Path $CacheDir "precompile-mpv-config"
     Ensure-Directory $precompileConfigDir
     $trtCacheForVpy = (Join-Path $CacheDir "rife-trt").Replace("\", "/")
-    foreach ($name in @("rife-4.26.vpy", "rife-4.6-light.vpy")) {
+    foreach ($name in @(
+        "rife-4.26.vpy",
+        "rife-4.26-x2.vpy",
+        "rife-4.26-x3.vpy",
+        "rife-4.26-x4.vpy",
+        "rife-4.6-light.vpy",
+        "rife-4.6-light-x2.vpy",
+        "rife-4.6-light-x3.vpy",
+        "rife-4.6-light-x4.vpy"
+    )) {
         $src = Join-Path $MpvConfigDir $name
         $dst = Join-Path $precompileConfigDir $name
         if ((Test-Path $src) -and -not $DryRun) {
@@ -1678,8 +1749,12 @@ function Precompile-RifeTensorRtEngines {
     )
 
     $vpyFiles = @(
-        "rife-4.26.vpy",
-        "rife-4.6-light.vpy"
+        "rife-4.26-x2.vpy",
+        "rife-4.26-x3.vpy",
+        "rife-4.26-x4.vpy",
+        "rife-4.6-light-x2.vpy",
+        "rife-4.6-light-x3.vpy",
+        "rife-4.6-light-x4.vpy"
     )
     foreach ($resolution in $resolutions) {
         $sample = New-RifePrecompileSample $resolution.Width $resolution.Height
@@ -1687,6 +1762,174 @@ function Precompile-RifeTensorRtEngines {
             Invoke-MpvRifePrecompile $sample $vpy $resolution.Label
         }
     }
+}
+
+function Get-RuntimeConfigMap {
+    $path = Join-Path $MpvConfigDir "runtime.conf"
+    $map = [ordered]@{}
+    if (Test-Path $path) {
+        foreach ($line in Get-Content -LiteralPath $path) {
+            if ($line -match '^\s*([A-Za-z0-9_\-]+)\s*=\s*(.*?)\s*$') {
+                $map[$Matches[1]] = $Matches[2]
+            }
+        }
+    }
+    return $map
+}
+
+function Set-RuntimeConfigValues {
+    param([hashtable]$Values)
+
+    $path = Join-Path $MpvConfigDir "runtime.conf"
+    if (-not (Test-Path $path)) {
+        Copy-ExampleIfMissing (Join-Path $ExamplesDir "runtime.conf.example") $path
+    }
+    if ($DryRun) {
+        foreach ($key in $Values.Keys) {
+            Write-Host "DRY-RUN: set runtime.conf $key=$($Values[$key])"
+        }
+        return
+    }
+
+    $lines = if (Test-Path $path) { [System.Collections.Generic.List[string]](Get-Content -LiteralPath $path) } else { [System.Collections.Generic.List[string]]::new() }
+    foreach ($key in $Values.Keys) {
+        $found = $false
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match "^\s*$([regex]::Escape($key))\s*=") {
+                $lines[$i] = "$key=$($Values[$key])"
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) {
+            $lines.Add("$key=$($Values[$key])")
+        }
+    }
+    Set-Content -LiteralPath $path -Value $lines -Encoding UTF8
+}
+
+function Get-ConfiguredDisplayRefresh {
+    $conf = Get-RuntimeConfigMap
+    $configured = 0.0
+    if ($conf.Contains("display_refresh") -and [double]::TryParse([string]$conf["display_refresh"], [ref]$configured) -and $configured -gt 0) {
+        return $configured
+    }
+    return 60.0
+}
+
+function Invoke-RifeRuntimeBenchmarkCase {
+    param(
+        [int]$Width,
+        [int]$Height,
+        [int]$Factor
+    )
+
+    $pythonExe = Join-Path $PythonDir "python.exe"
+    if (-not (Test-Path $pythonExe)) {
+        throw "python.exe is missing. Run install first."
+    }
+
+    $scriptPath = Join-Path $CacheDir ("rife-benchmark-" + [Guid]::NewGuid().ToString("N") + ".py")
+    $cachePath = (Join-Path $CacheDir "rife-trt").Replace("\", "/")
+    $code = @"
+import json
+import statistics
+import time
+from pathlib import Path
+
+import vapoursynth as vs
+from vsrife import rife
+
+core = vs.core
+cache = Path(r"$cachePath")
+cache.mkdir(parents=True, exist_ok=True)
+
+clip = core.std.BlankClip(width=$Width, height=$Height, format=vs.RGBH, length=240, fpsnum=24, fpsden=1)
+clip = rife(
+    clip,
+    model="4.26",
+    scale=1.0,
+    factor_num=$Factor,
+    factor_den=1,
+    auto_download=False,
+    trt=True,
+    trt_cache_dir=str(cache),
+)
+
+for i in range(36):
+    clip.get_frame(i)
+
+samples = []
+for i in range(36, 156):
+    t0 = time.perf_counter()
+    clip.get_frame(i)
+    samples.append((time.perf_counter() - t0) * 1000.0)
+
+ordered = sorted(samples)
+p99 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.99))]
+print(json.dumps({
+    "width": $Width,
+    "height": $Height,
+    "factor": $Factor,
+    "p99_ms": p99,
+    "mean_ms": statistics.fmean(samples),
+}))
+"@
+
+    if ($DryRun) {
+        Write-Host "DRY-RUN: benchmark RIFE $Width x $Height factor $Factor"
+        return @{ width = $Width; height = $Height; factor = $Factor; p99_ms = 0.0; mean_ms = 0.0 }
+    }
+
+    Set-PortablePythonEnvironment
+    Set-Content -LiteralPath $scriptPath -Value $code -Encoding UTF8
+    try {
+        $output = & $pythonExe $scriptPath 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "benchmark python failed: $output"
+        }
+        return (($output | Select-Object -Last 1) | ConvertFrom-Json)
+    } finally {
+        Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Measure-RifeRuntimeCapability {
+    if (-not $BenchmarkRifeRuntime) {
+        return
+    }
+
+    Write-Step "Benchmarking local RIFE runtime capability"
+    $refresh = Get-ConfiguredDisplayRefresh
+    $tiers = @(
+        @{ Key = "max_factor_720"; Label = "<=720p"; Width = 1280; Height = 720 },
+        @{ Key = "max_factor_1080"; Label = "720p<video<=1080p"; Width = 1920; Height = 1080 },
+        @{ Key = "max_factor_4k"; Label = "1080p<video<=4K"; Width = 3840; Height = 2160 }
+    )
+    $values = @{}
+
+    foreach ($tier in $tiers) {
+        $best = 0
+        foreach ($factor in @(4, 3, 2)) {
+            if ((24 * $factor) -gt ($refresh + 0.01)) {
+                continue
+            }
+            $result = Invoke-RifeRuntimeBenchmarkCase $tier.Width $tier.Height $factor
+            $budgetMs = 1000.0 / (24.0 * $factor)
+            Write-Host ("{0} x{1}: p99={2:n2}ms, budget={3:n2}ms" -f $tier.Label, $factor, [double]$result.p99_ms, $budgetMs)
+            if ([double]$result.p99_ms -le $budgetMs) {
+                $best = $factor
+                break
+            }
+        }
+        if ($best -lt 2) {
+            $best = 0
+        }
+        $values[$tier.Key] = $best
+        Write-Host ("{0}: default max RIFE x{1}" -f $tier.Label, $best)
+    }
+
+    Set-RuntimeConfigValues $values
 }
 
 function Set-PortablePythonEnvironment {
@@ -1812,6 +2055,7 @@ function Install-All {
     Migrate-LegacyLayout
     Initialize-Layout
     Initialize-Config
+    Update-MpvRuntimePolicyConfig
     Test-NvidiaVideoSuperResolution
     Configure-RifeTensorRtForGpu
     Install-Python
@@ -1826,6 +2070,7 @@ function Install-All {
     Remove-StaleMpvVapourSynthDlls
     Configure-VapourSynthPython
     Precompile-RifeTensorRtEngines
+    Measure-RifeRuntimeCapability
     Update-ShimGuiForPortable
     Update-ShimPlayerForPortable
     Update-ShimActionThreadForRobustness
