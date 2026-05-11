@@ -1,0 +1,121 @@
+import os
+from pathlib import Path
+import sys
+
+import vapoursynth as vs
+
+core = vs.core
+
+def _cache_dir() -> Path:
+    override = os.environ.get("RIFE_TRT_CACHE_DIR")
+    if override:
+        trt_cache_dir = Path(override)
+        trt_cache_dir.mkdir(parents=True, exist_ok=True)
+        return trt_cache_dir
+    trt_cache_dir = Path(__file__).resolve().parents[1] / "cache" / "rife-trt"
+    trt_cache_dir.mkdir(parents=True, exist_ok=True)
+    return trt_cache_dir
+
+
+def _gpu_input(clip: vs.VideoNode) -> vs.VideoNode:
+    if clip.format is None or clip.format.color_family != vs.YUV:
+        raise RuntimeError("GPU RIFE path expects YUV input")
+    if clip.format.id != int(vs.YUV420P10):
+        # Do bit-depth and chroma-subsampling normalisation before CUDA upload.
+        # On discrete GPUs this avoids sending 4:2:2/4:4:4 chroma over PCIe only
+        # to discard it inside the helper.
+        clip = core.resize.Bicubic(clip, format=vs.YUV420P10)
+    return clip
+
+
+def _cpu_rife(
+    source: vs.VideoNode,
+    *,
+    model: str,
+    scale: float,
+    factor_num: int,
+    factor_den: int,
+    width: int | None = None,
+    height: int | None = None,
+) -> vs.VideoNode:
+    from vsrife import rife
+
+    resize_args = {
+        "format": vs.RGBH,
+    }
+    if width is not None:
+        resize_args["width"] = width
+    if height is not None:
+        resize_args["height"] = height
+    clip = core.resize.Bicubic(source, **resize_args)
+    clip = rife(
+        clip,
+        model=model,
+        scale=scale,
+        factor_num=factor_num,
+        factor_den=factor_den,
+        auto_download=False,
+        trt=True,
+        trt_cache_dir=str(_cache_dir()),
+    )
+    return core.resize.Bicubic(
+        clip,
+        format=vs.YUV420P10,
+    )
+
+
+def run_rife_profile(
+    source: vs.VideoNode,
+    *,
+    model: str = "4.26",
+    scale: float = 1.0,
+    factor_num: int = 2,
+    factor_den: int = 1,
+    downsample_1080: bool = False,
+) -> vs.VideoNode:
+    target_w = None
+    target_h = None
+    if downsample_1080:
+        target_h = 1080
+        target_w = ((source.width * target_h) // source.height) & ~1
+
+    try:
+        gpu_clip = _gpu_input(source)
+        if downsample_1080:
+            from vs_gpu_helpers import downsample_yuv420p10_gpu, rife_yuv
+
+            gpu_clip = downsample_yuv420p10_gpu(
+                gpu_clip,
+                width=target_w,
+                height=target_h,
+            )
+        else:
+            from vs_gpu_helpers import rife_yuv
+
+        return rife_yuv(
+            gpu_clip,
+            model=model,
+            scale=scale,
+            factor_num=factor_num,
+            factor_den=factor_den,
+        )
+    except Exception as gpu_exc:
+        try:
+            return _cpu_rife(
+                source,
+                model=model,
+                scale=scale,
+                factor_num=factor_num,
+                factor_den=factor_den,
+                width=target_w,
+                height=target_h,
+            )
+        except Exception as cpu_exc:
+            fmt_name = getattr(source.format, "name", "?")
+            sys.stderr.write(
+                f"[rife.vpy] GPU path failed for {fmt_name}: "
+                f"{type(gpu_exc).__name__}: {gpu_exc}; "
+                f"CPU fallback failed: {type(cpu_exc).__name__}: {cpu_exc}; "
+                "passing through source\n"
+            )
+            return source

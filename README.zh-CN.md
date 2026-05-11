@@ -91,7 +91,7 @@ vapoursynth(RIFE) -> d3d11vpp(NVIDIA VSR)
 
 也就是说，低帧率 1080p 内容会先插帧再交给 NVIDIA 驱动级超分；高帧率 1080p 内容只做超分；高于 1080p 的低帧率内容默认保留原始 4K real frames，安装 benchmark 会先尝试全分辨率 `4.26 x4/x3/x2`，都失败才用 `4.26 scale=0.5 x2` 兜底。RIFE 会在“不超过显示器刷新率”的前提下选择最高倍率，最高 x4；例如 24fps 在 60Hz 下最多 x2，在 120Hz 下最多 x4。
 
-RIFE 的普通路径优先使用 `vs_gpu_helpers.rife_yuv`，把 YUV/RGB 色彩转换和 RIFE 输入/输出放到 CUDA/TensorRT 管线里；如果 helper 不可用，会回退到标准 `vsrife + core.resize.Bicubic` 路径。HDR10 常见的 YUV420P10 / BT.2020 NCL frame props 会保留，但 RIFE 本身不是线性光 HDR-aware 插帧算法。
+RIFE 的普通路径优先使用 `vs_gpu_helpers.rife_yuv`，把 YUV/RGB 色彩转换和 RIFE 输入/输出放到 CUDA/TensorRT 管线里。GPU 路径只对白名单矩阵和 `limited/full` range 启用；YUV422/YUV444 会先在 VapourSynth 侧规范化成 YUV420P10，避免把随后会被丢弃的色度平面传进 PCIe/CUDA 路径。如果 GPU helper 不可用，会回退到标准 `vsrife + core.resize.Bicubic` CPU 色转路径，而不是直接关闭插帧；如果逐帧颜色元数据不在白名单内，helper 会拒绝处理，避免静默产生错误颜色。HDR10 常见的 YUV420P10 / BT.2020 NCL frame props 会保留，但 RIFE 本身不是线性光 HDR-aware 插帧算法。
 
 `-EnableDownsampled4kVsr` 是性能优先的 4K 可选路径：
 
@@ -162,6 +162,7 @@ windows-jellyfin-mpv-rife/
 │   │   ├── rife-4.26.vpy.example
 │   │   ├── rife-4.26-half-x2.vpy.example
 │   │   ├── rife-4.26-down1080-x{2,3,4}.vpy.example
+│   │   ├── rife_vpy_common.py.example
 │   │   ├── vs_gpu_helpers.py.example
 │   │   ├── autorife.lua.example
 │   │   ├── autovsr.lua.example

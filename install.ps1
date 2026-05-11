@@ -233,6 +233,7 @@ function Initialize-Config {
     )) {
         Copy-Item -LiteralPath (Join-Path $ExamplesDir "$name.example") -Destination (Join-Path $MpvConfigDir $name) -Force
     }
+    Copy-Item -LiteralPath (Join-Path $ExamplesDir "rife_vpy_common.py.example") -Destination (Join-Path $MpvConfigDir "rife_vpy_common.py") -Force
     Copy-Item -LiteralPath (Join-Path $ExamplesDir "vs_gpu_helpers.py.example") -Destination (Join-Path $MpvConfigDir "vs_gpu_helpers.py") -Force
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "shim-conf.json.example") (Join-Path $ShimConfigDir "conf.json")
     Ensure-Directory (Join-Path $MpvConfigDir "scripts")
@@ -1760,9 +1761,14 @@ function Invoke-MpvRifePrecompile {
     if ((Test-Path $helperSource) -and -not $DryRun) {
         Copy-Item -LiteralPath $helperSource -Destination (Join-Path $precompileConfigDir "vs_gpu_helpers.py") -Force
     }
+    $commonSource = Join-Path $MpvConfigDir "rife_vpy_common.py"
+    if ((Test-Path $commonSource) -and -not $DryRun) {
+        Copy-Item -LiteralPath $commonSource -Destination (Join-Path $precompileConfigDir "rife_vpy_common.py") -Force
+    }
     $stdoutPath = Join-Path $LogsDir ("rife-precompile-" + [Guid]::NewGuid().ToString("N") + ".out.log")
     $stderrPath = Join-Path $LogsDir ("rife-precompile-" + [Guid]::NewGuid().ToString("N") + ".err.log")
     Set-PortablePythonEnvironment
+    $env:RIFE_TRT_CACHE_DIR = (Join-Path $CacheDir "rife-trt")
     $args = @(
         "--config-dir=$precompileConfigDir",
         "--load-scripts=no",

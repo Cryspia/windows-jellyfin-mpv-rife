@@ -1,39 +1,9 @@
-import vapoursynth as vs
 from pathlib import Path
 import sys
 
-core = vs.core
-clip = video_in
-trt_cache_dir = Path(__file__).resolve().parents[1] / "cache" / "rife-trt"
-trt_cache_dir.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-try:
-    from vs_gpu_helpers import rife_yuv
-    if clip.format.id != int(vs.YUV420P10):
-        clip = core.resize.Point(clip, format=vs.YUV420P10)
-    clip = rife_yuv(clip, model="4.26", scale=1.0, factor_num=2, factor_den=1)
-except Exception as exc:
-    from vsrife import rife
-    _MATRIX_NAME = {1: "709", 6: "170m", 7: "240m", 9: "2020ncl"}
-    try:
-        _m = int(clip.get_frame(0).props.get("_Matrix", 1))
-    except Exception:
-        _m = 1
-    _mtx = _MATRIX_NAME.get(_m, "709")
-    clip = core.resize.Bicubic(clip, format=vs.RGBH, matrix_in_s=_mtx)
-    clip = rife(
-        clip,
-        model="4.26",
-        scale=1.0,
-        factor_num=2,
-        factor_den=1,
-        auto_download=False,
-        trt=True,
-        trt_cache_dir=str(trt_cache_dir),
-    )
-    clip = core.resize.Bicubic(clip, format=vs.YUV420P10, matrix_s=_mtx)
+from rife_vpy_common import run_rife_profile
 
+clip = run_rife_profile(video_in, model="4.26", scale=1.0, factor_num=2, factor_den=1)
 clip.set_output()
-
-

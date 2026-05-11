@@ -91,7 +91,7 @@ vapoursynth(RIFE) -> d3d11vpp(NVIDIA VSR)
 
 Low-fps 1080p content is interpolated first and then passed to driver-level upscaling. High-fps 1080p content uses VSR only. Low-fps content above 1080p keeps original 4K real frames by default; the installer benchmark tries full-resolution `4.26 x4/x3/x2` first and only uses `4.26 scale=0.5 x2` if full-resolution RIFE fails. RIFE picks the highest factor that does not exceed the display refresh rate, up to x4; for example, 24fps caps at x2 on 60Hz and x4 on 120Hz.
 
-The normal RIFE path prefers `vs_gpu_helpers.rife_yuv`, which keeps YUV/RGB conversion and RIFE input/output on the CUDA/TensorRT path. If the helper is unavailable, the scripts fall back to standard `vsrife + core.resize.Bicubic`. Common HDR10 YUV420P10 / BT.2020 NCL frame props are preserved, but RIFE itself is not a linear-light HDR-aware interpolation algorithm.
+The normal RIFE path prefers `vs_gpu_helpers.rife_yuv`, which keeps YUV/RGB conversion and RIFE input/output on the CUDA/TensorRT path. The GPU path only runs for whitelisted matrices and `limited/full` ranges; YUV422/YUV444 input is normalized to YUV420P10 on the VapourSynth side before CUDA upload, avoiding PCIe traffic for chroma planes that would be discarded anyway. If the GPU helper is unavailable, the scripts fall back to the standard `vsrife + core.resize.Bicubic` CPU color-conversion path instead of disabling interpolation outright; if per-frame color metadata is outside the whitelist, the helper refuses to process it rather than silently producing wrong colors. Common HDR10 YUV420P10 / BT.2020 NCL frame props are preserved, but RIFE itself is not a linear-light HDR-aware interpolation algorithm.
 
 `-EnableDownsampled4kVsr` enables a performance-first 4K path:
 
@@ -162,6 +162,7 @@ windows-jellyfin-mpv-rife/
 │   │   ├── rife-4.26.vpy.example
 │   │   ├── rife-4.26-half-x2.vpy.example
 │   │   ├── rife-4.26-down1080-x{2,3,4}.vpy.example
+│   │   ├── rife_vpy_common.py.example
 │   │   ├── vs_gpu_helpers.py.example
 │   │   ├── autorife.lua.example
 │   │   ├── autovsr.lua.example
