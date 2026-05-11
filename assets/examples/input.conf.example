@@ -1,4 +1,4 @@
-# F9 is handled by scripts/autorife.lua: x4 -> x3 -> x2 -> off.
+# F9 is handled by scripts/autorife.lua: auto/default x4 -> 4.26 x3 -> 4.26 x2 -> 4.26 x2 scale=0.5 -> off.
 
 # F10 bindings are used by the dandanplay danmaku script when installed.
 # Other mpv defaults are left intact.

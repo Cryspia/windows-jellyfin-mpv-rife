@@ -91,11 +91,13 @@ RIFE uses TensorRT with a patched mixed-precision policy by default. The install
 
 During installation, the script also precompiles common RIFE TensorRT engines for 720p, 1080p, and 4K with both bundled RIFE profiles. This avoids the long first-playback TensorRT build pause. 4K engine builds can take several minutes even on high-end GPUs; use `-SkipRifeTrtPrecompile` when you need a faster install and accept the first-playback compile delay.
 
-`config/mpv/runtime.conf` controls runtime policy. Set `display_refresh`, `vsr_target_w`, and `vsr_target_h` there to pin refresh rate and VSR target size on multi-monitor systems. The default local capability caps are `max_factor_720`, `max_factor_1080`, and `max_factor_4k`; with `-BenchmarkRifeRuntime`, the installer tests 720p/1080p/4K 24fps synthetic clips at x4/x3/x2, warms and reuses TRT cache, and writes the highest p99-safe factor for each tier. Benchmarking uses `runtime.conf` `display_refresh` first, then the Windows current display mode refresh rate, and falls back to 60Hz only if detection fails.
+`config/mpv/runtime.conf` controls runtime policy. Set `display_refresh`, `vsr_target_w`, and `vsr_target_h` there to pin refresh rate and VSR target size on multi-monitor systems. The default local capability caps are `max_factor_720`, `max_factor_1080`, and `max_factor_4k`; the default profile fields are `rife_model_720`, `rife_model_1080`, and `rife_model_4k`, normally kept at `4.26`. With `-BenchmarkRifeRuntime`, the installer tests 720p/1080p/4K 24fps synthetic clips with 4.26 at x4/x3/x2, measuring group p99 as the total time needed for all inserted frames within one source-frame interval. A factor passes when group p99 fits inside the 24fps source-frame budget of 41.67ms. If a tier cannot pass even 4.26 x2, the installer additionally tests `4.26-half`, meaning RIFE 4.26 x2 with `scale=0.5` optical flow; when that passes, it writes that tier as `4.26-half` x2. Benchmarking uses `runtime.conf` `display_refresh` first, then the Windows current display mode refresh rate, and falls back to 60Hz only if detection fails.
+
+The RIFE VapourSynth queue defaults to `rife_buffered_frames=12` and `rife_concurrent_frames=4` to smooth TensorRT frame-time spikes. Lower them manually if VRAM is tight or latency matters more.
 
 ## Keybindings
 
-- `F9` cycles the RIFE cap x4 -> x3 -> x2 -> off; the effective factor is still limited by display refresh and `runtime.conf` capability caps.
+- `F9` cycles RIFE modes auto/default x4 -> 4.26 x3 -> 4.26 x2 -> 4.26 x2 scale=0.5 -> off; the effective factor is still limited by display refresh and `runtime.conf` capability caps.
 - `F10` toggles danmaku visibility.
 - `Shift+F10` opens the danmaku settings panel.
 - `Ctrl+F10` opens manual danmaku search.
@@ -144,7 +146,7 @@ windows-jellyfin-mpv-rife/
 │   │   ├── input.conf.example
 │   │   ├── runtime.conf.example
 │   │   ├── rife-4.26.vpy.example
-│   │   ├── rife-4.6-light.vpy.example
+│   │   ├── rife-4.26-half-x2.vpy.example
 │   │   ├── autorife.lua.example
 │   │   ├── autovsr.lua.example
 │   │   └── shim-conf.json.example

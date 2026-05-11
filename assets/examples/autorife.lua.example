@@ -3,9 +3,16 @@ local msg = require("mp.msg")
 local utils = require("mp.utils")
 
 local applying = false
-local manual_caps = { 4, 3, 2, 0 }
+local manual_modes = {
+    { cap = 4, model = "auto", label = "auto up to x4" },
+    { cap = 3, model = "4.26", label = "4.26 up to x3" },
+    { cap = 2, model = "4.26", label = "4.26 x2" },
+    { cap = 2, model = "4.26-half", label = "4.26 x2 scale=0.5" },
+    { cap = 0, model = nil, label = "off" },
+}
 local manual_index = 1
 local active_factor = 0
+local active_model = nil
 
 local function current_script_dir()
     local ok, dir = pcall(mp.get_script_directory)
@@ -19,14 +26,6 @@ end
 
 local script_dir = current_script_dir()
 local config_dir = utils.join_path(script_dir, "..")
-
-local function has_rife(vf)
-    return vf and string.find(vf, "@rife", 1, true) ~= nil
-end
-
-local function has_vsr(vf)
-    return vf and string.find(vf, "@vsr", 1, true) ~= nil
-end
 
 local function read_runtime_conf()
     local conf = {}
@@ -64,6 +63,19 @@ local function clamp_factor(value)
     return n
 end
 
+local function clamp_positive_int(value, default_value)
+    local n = math.floor(tonumber(value or "") or default_value)
+    if n < 1 then return default_value end
+    return n
+end
+
+local function normalize_model(value)
+    if value == "4.26-half" or value == "4.26-scale0.5" or value == "4.26-half-x2" then
+        return "4.26-half"
+    end
+    return "4.26"
+end
+
 local function source_tier_max(conf, height)
     if height <= 720 then
         return clamp_factor(conf.max_factor_720)
@@ -71,6 +83,15 @@ local function source_tier_max(conf, height)
         return clamp_factor(conf.max_factor_1080)
     end
     return clamp_factor(conf.max_factor_4k)
+end
+
+local function source_tier_model(conf, height)
+    if height <= 720 then
+        return normalize_model(conf.rife_model_720)
+    elseif height <= 1080 then
+        return normalize_model(conf.rife_model_1080)
+    end
+    return normalize_model(conf.rife_model_4k)
 end
 
 local function display_refresh(conf)
@@ -81,15 +102,16 @@ local function choose_factor(conf)
     local fps = mp.get_property_native("container-fps") or mp.get_property_native("estimated-vf-fps")
     local height = mp.get_property_native("height")
     if not fps or not height or fps <= 0 then
-        return 0, "missing source fps/height"
+        return 0, nil, "missing source fps/height"
     end
     if fps > 60.0001 then
-        return 0, string.format("source %.3ffps > 60fps", fps)
+        return 0, nil, string.format("source %.3ffps > 60fps", fps)
     end
 
-    local cap = manual_caps[manual_index]
+    local mode = manual_modes[manual_index]
+    local cap = mode.cap
     if cap <= 0 then
-        return 0, "manual off"
+        return 0, nil, "manual off"
     end
 
     local refresh = display_refresh(conf)
@@ -97,49 +119,58 @@ local function choose_factor(conf)
     local tier_cap = source_tier_max(conf, height)
     local factor = math.min(4, cap, tier_cap, refresh_cap)
     if factor < 2 then
-        return 0, string.format("refresh %.3fHz cannot fit %.3ffps x2", refresh, fps)
+        return 0, nil, string.format("refresh %.3fHz cannot fit %.3ffps x2", refresh, fps)
     end
-    return factor, string.format("fps %.3f, refresh %.3fHz, caps manual=%d tier=%d", fps, refresh, cap, tier_cap)
+    local model = mode.model
+    if model == "auto" or model == nil then
+        model = source_tier_model(conf, height)
+    end
+    return factor, model, string.format("fps %.3f, refresh %.3fHz, caps manual=%d tier=%d mode=%s", fps, refresh, cap, tier_cap, mode.label)
 end
 
 local function apply()
     if applying then return end
     local conf = read_runtime_conf()
-    local factor, reason = choose_factor(conf)
-    local vf = mp.get_property("vf") or ""
+    local factor, model, reason = choose_factor(conf)
 
-    if active_factor == factor and ((factor == 0 and not has_rife(vf)) or (factor > 0 and has_rife(vf))) then
+    if factor == 0 and reason == "missing source fps/height" then
+        return
+    end
+
+    if active_factor == factor and active_model == model then
         return
     end
 
     applying = true
-    if has_vsr(vf) then
-        mp.commandv("vf", "remove", "@vsr")
-    end
-    if has_rife(vf) then
-        mp.commandv("vf", "remove", "@rife")
+    if active_factor and active_factor > 0 then
+        pcall(mp.commandv, "vf", "remove", "@vsr")
+        pcall(mp.commandv, "vf", "remove", "@rife")
     end
 
     if factor > 0 then
-        local script_name = string.format("rife-4.26-x%d.vpy", factor)
+        local script_name = string.format("rife-%s-x%d.vpy", model, factor)
         local script_path = mp.find_config_file(script_name) or utils.join_path(config_dir, script_name)
-        mp.commandv("vf", "append", "@rife:vapoursynth=file=" .. script_path)
-        msg.info(string.format("RIFE: x%d enabled (%s)", factor, reason))
-        mp.osd_message(string.format("RIFE: x%d", factor), 1.5)
+        local buffered_frames = clamp_positive_int(conf.rife_buffered_frames, 12)
+        local concurrent_frames = clamp_positive_int(conf.rife_concurrent_frames, 4)
+        mp.commandv("vf", "append", string.format("@rife:vapoursynth=file=%s:buffered-frames=%d:concurrent-frames=%d", script_path, buffered_frames, concurrent_frames))
+        msg.info(string.format("RIFE: %s x%d enabled (%s, buffered=%d, concurrent=%d)", model, factor, reason, buffered_frames, concurrent_frames))
+        mp.osd_message(string.format("RIFE: %s x%d", model, factor), 1.5)
     else
         msg.info("RIFE: disabled (" .. reason .. ")")
         mp.osd_message("RIFE: off", 1.5)
     end
     active_factor = factor
+    active_model = model
     applying = false
 end
 
 local function cycle_manual_cap()
     manual_index = manual_index + 1
-    if manual_index > #manual_caps then
+    if manual_index > #manual_modes then
         manual_index = 1
     end
     active_factor = nil
+    active_model = nil
     apply()
 end
 

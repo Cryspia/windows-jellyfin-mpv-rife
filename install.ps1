@@ -221,14 +221,11 @@ function Initialize-Config {
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "input.conf.example") (Join-Path $MpvConfigDir "input.conf")
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "runtime.conf.example") (Join-Path $MpvConfigDir "runtime.conf")
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "rife-4.26.vpy.example") (Join-Path $MpvConfigDir "rife-4.26.vpy")
-    Copy-ExampleIfMissing (Join-Path $ExamplesDir "rife-4.6-light.vpy.example") (Join-Path $MpvConfigDir "rife-4.6-light.vpy")
     foreach ($name in @(
         "rife-4.26-x2.vpy",
         "rife-4.26-x3.vpy",
         "rife-4.26-x4.vpy",
-        "rife-4.6-light-x2.vpy",
-        "rife-4.6-light-x3.vpy",
-        "rife-4.6-light-x4.vpy"
+        "rife-4.26-half-x2.vpy"
     )) {
         Copy-ExampleIfMissing (Join-Path $ExamplesDir "$name.example") (Join-Path $MpvConfigDir $name)
     }
@@ -236,6 +233,16 @@ function Initialize-Config {
     Ensure-Directory (Join-Path $MpvConfigDir "scripts")
     Copy-Item -LiteralPath (Join-Path $ExamplesDir "autorife.lua.example") -Destination (Join-Path $MpvConfigDir "scripts\autorife.lua") -Force
     Copy-Item -LiteralPath (Join-Path $ExamplesDir "autovsr.lua.example") -Destination (Join-Path $MpvConfigDir "scripts\autovsr.lua") -Force
+    Add-RuntimeConfigDefaultValues @{
+        max_factor_720 = "4"
+        max_factor_1080 = "4"
+        max_factor_4k = "4"
+        rife_model_720 = "4.26"
+        rife_model_1080 = "4.26"
+        rife_model_4k = "4.26"
+        rife_buffered_frames = "12"
+        rife_concurrent_frames = "4"
+    }
 
     $shaderSource = Join-Path $AssetsDir "shaders\FSRCNNX_x2_8-0-4-1.glsl"
     $shaderTargetDir = Join-Path $MpvConfigDir "shaders"
@@ -268,8 +275,10 @@ function Update-MpvRuntimePolicyConfig {
             $content = Get-Content -LiteralPath $inputConf -Raw
             $content = $content -replace '(?m)^F9\s+cycle-values\s+vf.*\r?\n?', ''
             $content = $content -replace '(?m)^# F9 cycles RIFE modes manually:.*\r?\n?', ''
+            $content = $content -replace '(?m)^# F9 is handled by scripts/autorife\.lua:.*$',
+                '# F9 is handled by scripts/autorife.lua: auto/default x4 -> 4.26 x3 -> 4.26 x2 -> 4.26 x2 scale=0.5 -> off.'
             if ($content -notmatch 'autorife\.lua') {
-                $content = "# F9 is handled by scripts/autorife.lua: x4 -> x3 -> x2 -> off.`r`n" + $content
+                $content = "# F9 is handled by scripts/autorife.lua: auto/default x4 -> 4.26 x3 -> 4.26 x2 -> 4.26 x2 scale=0.5 -> off.`r`n" + $content
             }
             Set-Content -LiteralPath $inputConf -Value $content.TrimEnd() -Encoding UTF8
         }
@@ -340,10 +349,7 @@ function Configure-RifeTensorRtForGpu {
         "rife-4.26-x2.vpy",
         "rife-4.26-x3.vpy",
         "rife-4.26-x4.vpy",
-        "rife-4.6-light.vpy",
-        "rife-4.6-light-x2.vpy",
-        "rife-4.6-light-x3.vpy",
-        "rife-4.6-light-x4.vpy"
+        "rife-4.26-half-x2.vpy"
     )) {
         Set-RifeTensorRtInFile (Join-Path $MpvConfigDir $name) $true
     }
@@ -710,7 +716,7 @@ function Install-PythonPackages {
 function Ensure-RifeModels {
     $pythonExe = Join-Path $PythonDir "python.exe"
     if ($DryRun) {
-        Write-Host "DRY-RUN: predownload RIFE 4.26 and 4.6 models"
+        Write-Host "DRY-RUN: predownload RIFE 4.26 model"
         return
     }
     if (-not (Test-Path $pythonExe)) {
@@ -723,7 +729,6 @@ from vsrife.__main__ import download_model
 
 models = {
     "flownet_v4.26.pkl": "https://github.com/HolyWu/vs-rife/releases/download/model/flownet_v4.26.pkl",
-    "flownet_v4.6.pkl": "https://github.com/HolyWu/vs-rife/releases/download/model/flownet_v4.6.pkl",
 }
 
 root = Path(model_dir)
@@ -1490,7 +1495,6 @@ function Remove-LegacyShimMpvCopies {
         "mpv.conf",
         "input.conf",
         "rife-4.26.vpy",
-        "rife-4.6-light.vpy",
         "scripts",
         "shaders"
     ) | ForEach-Object { Join-Path $ShimConfigDir $_ }
@@ -1547,6 +1551,35 @@ function Cleanup-ObsoleteConfig {
         } else {
             Remove-Item -LiteralPath $danmakuDir -Recurse -Force
         }
+    }
+
+    foreach ($name in @(
+        "rife-4.6-light.vpy",
+        "rife-4.6-light-x2.vpy",
+        "rife-4.6-light-x3.vpy",
+        "rife-4.6-light-x4.vpy"
+    )) {
+        $path = Join-Path $MpvConfigDir $name
+        if (Test-Path $path) {
+            Write-Step "Removing obsolete $name"
+            if ($DryRun) {
+                Write-Host "DRY-RUN: remove $path"
+            } else {
+                Remove-Item -LiteralPath $path -Force
+            }
+        }
+    }
+
+    $conf = Get-RuntimeConfigMap
+    $runtimeUpdates = @{}
+    foreach ($key in @("rife_model_720", "rife_model_1080", "rife_model_4k")) {
+        if ($conf.Contains($key) -and ([string]$conf[$key]) -match '^4\.6') {
+            $runtimeUpdates[$key] = "4.26"
+        }
+    }
+    if ($runtimeUpdates.Count -gt 0) {
+        Write-Step "Migrating obsolete RIFE 4.6 runtime profiles to 4.26"
+        Set-RuntimeConfigValues $runtimeUpdates
     }
 }
 
@@ -1688,10 +1721,7 @@ function Invoke-MpvRifePrecompile {
         "rife-4.26-x2.vpy",
         "rife-4.26-x3.vpy",
         "rife-4.26-x4.vpy",
-        "rife-4.6-light.vpy",
-        "rife-4.6-light-x2.vpy",
-        "rife-4.6-light-x3.vpy",
-        "rife-4.6-light-x4.vpy"
+        "rife-4.26-half-x2.vpy"
     )) {
         $src = Join-Path $MpvConfigDir $name
         $dst = Join-Path $precompileConfigDir $name
@@ -1752,9 +1782,7 @@ function Precompile-RifeTensorRtEngines {
         "rife-4.26-x2.vpy",
         "rife-4.26-x3.vpy",
         "rife-4.26-x4.vpy",
-        "rife-4.6-light-x2.vpy",
-        "rife-4.6-light-x3.vpy",
-        "rife-4.6-light-x4.vpy"
+        "rife-4.26-half-x2.vpy"
     )
     foreach ($resolution in $resolutions) {
         $sample = New-RifePrecompileSample $resolution.Width $resolution.Height
@@ -1791,7 +1819,12 @@ function Set-RuntimeConfigValues {
         return
     }
 
-    $lines = if (Test-Path $path) { [System.Collections.Generic.List[string]](Get-Content -LiteralPath $path) } else { [System.Collections.Generic.List[string]]::new() }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    if (Test-Path $path) {
+        foreach ($line in Get-Content -LiteralPath $path) {
+            $lines.Add($line)
+        }
+    }
     foreach ($key in $Values.Keys) {
         $found = $false
         for ($i = 0; $i -lt $lines.Count; $i++) {
@@ -1806,6 +1839,21 @@ function Set-RuntimeConfigValues {
         }
     }
     Set-Content -LiteralPath $path -Value $lines -Encoding UTF8
+}
+
+function Add-RuntimeConfigDefaultValues {
+    param([hashtable]$Values)
+
+    $existing = Get-RuntimeConfigMap
+    $missing = @{}
+    foreach ($key in $Values.Keys) {
+        if (-not $existing.Contains($key)) {
+            $missing[$key] = $Values[$key]
+        }
+    }
+    if ($missing.Count -gt 0) {
+        Set-RuntimeConfigValues $missing
+    }
 }
 
 function Get-WindowsDisplayRefresh {
@@ -1901,7 +1949,9 @@ function Invoke-RifeRuntimeBenchmarkCase {
     param(
         [int]$Width,
         [int]$Height,
-        [int]$Factor
+        [int]$Factor,
+        [string]$Model = "4.26",
+        [double]$Scale = 1.0
     )
 
     $pythonExe = Join-Path $PythonDir "python.exe"
@@ -1927,8 +1977,8 @@ cache.mkdir(parents=True, exist_ok=True)
 clip = core.std.BlankClip(width=$Width, height=$Height, format=vs.RGBH, length=240, fpsnum=24, fpsden=1)
 clip = rife(
     clip,
-    model="4.26",
-    scale=1.0,
+    model="$Model",
+    scale=$Scale,
     factor_num=$Factor,
     factor_den=1,
     auto_download=False,
@@ -1936,13 +1986,18 @@ clip = rife(
     trt_cache_dir=str(cache),
 )
 
-for i in range(36):
-    clip.get_frame(i)
+for group in range(12):
+    base = group * $Factor
+    for offset in range($Factor):
+        clip.get_frame(base + offset)
 
 samples = []
-for i in range(36, 156):
+for group in range(12, 72):
+    base = group * $Factor
+    clip.get_frame(base)
     t0 = time.perf_counter()
-    clip.get_frame(i)
+    for offset in range(1, $Factor):
+        clip.get_frame(base + offset)
     samples.append((time.perf_counter() - t0) * 1000.0)
 
 ordered = sorted(samples)
@@ -1951,14 +2006,17 @@ print(json.dumps({
     "width": $Width,
     "height": $Height,
     "factor": $Factor,
-    "p99_ms": p99,
-    "mean_ms": statistics.fmean(samples),
+    "model": "$Model",
+    "scale": $Scale,
+    "group_p99_ms": p99,
+    "group_mean_ms": statistics.fmean(samples),
+    "inserted_frames_per_group": $Factor - 1,
 }))
 "@
 
     if ($DryRun) {
-        Write-Host "DRY-RUN: benchmark RIFE $Width x $Height factor $Factor"
-        return @{ width = $Width; height = $Height; factor = $Factor; p99_ms = 0.0; mean_ms = 0.0 }
+        Write-Host "DRY-RUN: benchmark RIFE $Model scale=$Scale $Width x $Height factor $Factor"
+        return @{ width = $Width; height = $Height; factor = $Factor; model = $Model; scale = $Scale; group_p99_ms = 0.0; group_mean_ms = 0.0 }
     }
 
     Set-PortablePythonEnvironment
@@ -1996,23 +2054,36 @@ function Measure-RifeRuntimeCapability {
 
     foreach ($tier in $tiers) {
         $best = 0
+        $model = "4.26"
+        $sourceBudgetMs = 1000.0 / 24.0
         foreach ($factor in @(4, 3, 2)) {
             if ((24 * $factor) -gt ($refresh + 0.01)) {
                 continue
             }
-            $result = Invoke-RifeRuntimeBenchmarkCase $tier.Width $tier.Height $factor
-            $budgetMs = 1000.0 / (24.0 * $factor)
-            Write-Host ("{0} x{1}: p99={2:n2}ms, budget={3:n2}ms" -f $tier.Label, $factor, [double]$result.p99_ms, $budgetMs)
-            if ([double]$result.p99_ms -le $budgetMs) {
+            $result = Invoke-RifeRuntimeBenchmarkCase $tier.Width $tier.Height $factor "4.26" 1.0
+            Write-Host ("{0} 4.26 x{1}: group-p99={2:n2}ms, source-budget={3:n2}ms" -f $tier.Label, $factor, [double]$result.group_p99_ms, $sourceBudgetMs)
+            if ([double]$result.group_p99_ms -le $sourceBudgetMs) {
                 $best = $factor
                 break
             }
         }
         if ($best -lt 2) {
-            $best = 0
+            if ((24 * 2) -le ($refresh + 0.01)) {
+                $result = Invoke-RifeRuntimeBenchmarkCase $tier.Width $tier.Height 2 "4.26" 0.5
+                Write-Host ("{0} 4.26 x2 scale=0.5 fallback: group-p99={1:n2}ms, source-budget={2:n2}ms" -f $tier.Label, [double]$result.group_p99_ms, $sourceBudgetMs)
+                if ([double]$result.group_p99_ms -le $sourceBudgetMs) {
+                    $best = 2
+                    $model = "4.26-half"
+                }
+            }
+            if ($best -lt 2) {
+                $best = 0
+            }
         }
         $values[$tier.Key] = $best
-        Write-Host ("{0}: default max RIFE x{1}" -f $tier.Label, $best)
+        $modelKey = $tier.Key -replace '^max_factor_', 'rife_model_'
+        $values[$modelKey] = $model
+        Write-Host ("{0}: default RIFE {1} x{2}" -f $tier.Label, $model, $best)
     }
 
     Set-RuntimeConfigValues $values

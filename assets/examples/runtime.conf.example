@@ -14,3 +14,13 @@ max_factor_720=4
 max_factor_1080=4
 max_factor_4k=4
 
+# RIFE profile per source-height tier. Defaults stay on 4.26 for quality.
+# Benchmark fallback may set a tier to 4.26-half when 4.26 x2 is too slow.
+rife_model_720=4.26
+rife_model_1080=4.26
+rife_model_4k=4.26
+
+# VapourSynth queue depth for RIFE. Higher values smooth frame-time spikes but
+# use more VRAM and add latency.
+rife_buffered_frames=12
+rife_concurrent_frames=4
