@@ -21,6 +21,10 @@ local function has_vsr(vf)
     return vf and string.find(vf, "@vsr", 1, true) ~= nil
 end
 
+local function has_downsampled_rife(vf)
+    return vf and string.find(vf, "down1080", 1, true) ~= nil
+end
+
 local function supported_format(fmt)
     return fmt == "nv12" or fmt == "p010" or fmt == "yuv420p" or fmt == "yuv420p10"
 end
@@ -84,13 +88,32 @@ local function autovsr()
     local pixfmt = mp.get_property_native("video-params/hw-pixelformat") or mp.get_property_native("video-params/pixelformat")
     local vf = mp.get_property("vf")
 
-    if not display_width or not display_height or not video_width or not video_height then
+    if not video_width or not video_height then
         return
     end
 
+    local downsampled_rife = has_downsampled_rife(vf)
+    if (not display_width or not display_height) and downsampled_rife then
+        display_width = video_width
+        display_height = video_height
+    end
+    if not display_width or not display_height then
+        return
+    end
+
+    local effective_width = video_width
+    local effective_height = video_height
+    if downsampled_rife and video_height > 1080 then
+        effective_height = 1080
+        effective_width = math.floor((video_width * effective_height) / video_height)
+        if effective_width % 2 == 1 then
+            effective_width = effective_width - 1
+        end
+    end
+
     local source_is_1080p_or_lower = video_width <= 1920 and video_height <= 1080
-    local scale = compute_fit_scale(video_width, video_height, display_width, display_height)
-    if source_is_1080p_or_lower and scale > 1.0 and supported_format(pixfmt) then
+    local scale = compute_fit_scale(effective_width, effective_height, display_width, display_height)
+    if (source_is_1080p_or_lower or downsampled_rife) and scale > 1.0 and (downsampled_rife or supported_format(pixfmt)) then
         if has_vsr(vf) and last_scale == scale then
             return
         end
@@ -100,10 +123,14 @@ local function autovsr()
         end
         msg.info(string.format(
             "NVIDIA VSR: source %dx%d, target %dx%d, scale %.1fx",
-            video_width, video_height, display_width, display_height, scale))
+            effective_width, effective_height, display_width, display_height, scale))
         mp.commandv("vf", "append", "@vsr:d3d11vpp=scale=" .. scale .. ":scaling-mode=nvidia")
         last_scale = scale
         applying = false
+        return
+    end
+
+    if has_vsr(vf) and video_height > 1080 then
         return
     end
 
@@ -116,11 +143,17 @@ local function autovsr()
     end
 end
 
-mp.observe_property("display-width", "native", autovsr)
-mp.observe_property("display-height", "native", autovsr)
-mp.observe_property("width", "native", autovsr)
-mp.observe_property("height", "native", autovsr)
-mp.observe_property("video-params/pixelformat", "native", autovsr)
-mp.observe_property("video-params/hw-pixelformat", "native", autovsr)
-mp.observe_property("vf", "native", autovsr)
-mp.register_event("file-loaded", autovsr)
+local function schedule_autovsr()
+    autovsr()
+    mp.add_timeout(0.25, autovsr)
+end
+
+mp.observe_property("display-width", "native", schedule_autovsr)
+mp.observe_property("display-height", "native", schedule_autovsr)
+mp.observe_property("width", "native", schedule_autovsr)
+mp.observe_property("height", "native", schedule_autovsr)
+mp.observe_property("video-params/pixelformat", "native", schedule_autovsr)
+mp.observe_property("video-params/hw-pixelformat", "native", schedule_autovsr)
+mp.observe_property("vf", "native", schedule_autovsr)
+mp.register_event("video-reconfig", schedule_autovsr)
+mp.register_event("file-loaded", schedule_autovsr)

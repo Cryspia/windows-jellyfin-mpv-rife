@@ -7,7 +7,7 @@ local manual_modes = {
     { cap = 4, model = "auto", label = "auto up to x4" },
     { cap = 3, model = "4.26", label = "4.26 up to x3" },
     { cap = 2, model = "4.26", label = "4.26 x2" },
-    { cap = 2, model = "4.26-half", label = "4.26 x2 scale=0.5" },
+    { cap = 4, model = "last-4k", label = "4K fallback profile" },
     { cap = 0, model = nil, label = "off" },
 }
 local manual_index = 1
@@ -73,7 +73,15 @@ local function normalize_model(value)
     if value == "4.26-half" or value == "4.26-scale0.5" or value == "4.26-half-x2" then
         return "4.26-half"
     end
+    if value == "4.26-down1080" or value == "4.26-down1080-vsr" or value == "down1080" then
+        return "4.26-down1080"
+    end
     return "4.26"
+end
+
+local function bool_enabled(value)
+    value = tostring(value or ""):lower()
+    return value == "1" or value == "yes" or value == "true" or value == "on"
 end
 
 local function source_tier_max(conf, height)
@@ -96,6 +104,44 @@ end
 
 local function display_refresh(conf)
     return number_or_nil(conf.display_refresh) or number_or_nil(os.getenv("RIFE_DISPLAY_REFRESH")) or mp.get_property_native("display-fps") or 60
+end
+
+local function display_size(conf, source_width, source_height)
+    local cw = number_or_nil(conf.vsr_target_w)
+    local ch = number_or_nil(conf.vsr_target_h)
+    if cw and ch then
+        return cw, ch
+    end
+    local ew = number_or_nil(os.getenv("VSR_TARGET_W"))
+    local eh = number_or_nil(os.getenv("VSR_TARGET_H"))
+    if ew and eh then
+        return ew, eh
+    end
+    local dw = mp.get_property_native("display-width")
+    local dh = mp.get_property_native("display-height")
+    if dw and dh then
+        return dw, dh
+    end
+    return source_width, source_height
+end
+
+local function downsample_vsr_scale(conf)
+    local source_width = mp.get_property_native("width")
+    local source_height = mp.get_property_native("height")
+    if not source_width or not source_height or source_height <= 1080 then
+        return nil
+    end
+    local effective_height = 1080
+    local effective_width = math.floor((source_width * effective_height) / source_height)
+    if effective_width % 2 == 1 then
+        effective_width = effective_width - 1
+    end
+    local target_width, target_height = display_size(conf, source_width, source_height)
+    local scale = math.min(target_width / effective_width, target_height / effective_height)
+    scale = math.floor(scale * 10) / 10
+    if scale > 4.0 then scale = 4.0 end
+    if scale <= 1.0 then return nil end
+    return scale
 end
 
 local function choose_factor(conf)
@@ -124,6 +170,19 @@ local function choose_factor(conf)
     local model = mode.model
     if model == "auto" or model == nil then
         model = source_tier_model(conf, height)
+    elseif model == "last-4k" then
+        if height > 1080 and bool_enabled(conf.enable_4k_downsample_vsr) then
+            model = "4.26-down1080"
+            cap = 4
+            factor = math.min(4, cap, tier_cap, refresh_cap)
+        else
+            model = "4.26-half"
+            cap = 2
+            factor = math.min(2, tier_cap, refresh_cap)
+        end
+    end
+    if factor < 2 then
+        return 0, nil, string.format("refresh %.3fHz cannot fit %.3ffps x2", refresh, fps)
     end
     return factor, model, string.format("fps %.3f, refresh %.3fHz, caps manual=%d tier=%d mode=%s", fps, refresh, cap, tier_cap, mode.label)
 end
@@ -149,10 +208,19 @@ local function apply()
 
     if factor > 0 then
         local script_name = string.format("rife-%s-x%d.vpy", model, factor)
-        local script_path = mp.find_config_file(script_name) or utils.join_path(config_dir, script_name)
+        local script_path = "~~/" .. script_name
         local buffered_frames = clamp_positive_int(conf.rife_buffered_frames, 12)
         local concurrent_frames = clamp_positive_int(conf.rife_concurrent_frames, 4)
         mp.commandv("vf", "append", string.format("@rife:vapoursynth=file=%s:buffered-frames=%d:concurrent-frames=%d", script_path, buffered_frames, concurrent_frames))
+        if model == "4.26-down1080" then
+            local vsr_scale = downsample_vsr_scale(conf)
+            if vsr_scale then
+                mp.add_timeout(0.25, function()
+                    mp.commandv("vf", "append", "@vsr:d3d11vpp=scale=" .. vsr_scale .. ":scaling-mode=nvidia")
+                    msg.info(string.format("NVIDIA VSR: downsampled RIFE scale %.1fx", vsr_scale))
+                end)
+            end
+        end
         msg.info(string.format("RIFE: %s x%d enabled (%s, buffered=%d, concurrent=%d)", model, factor, reason, buffered_frames, concurrent_frames))
         mp.osd_message(string.format("RIFE: %s x%d", model, factor), 1.5)
     else

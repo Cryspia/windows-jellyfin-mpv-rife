@@ -39,6 +39,10 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 # Benchmark local RIFE capability and write tier defaults to runtime.conf
 .\install.ps1 install -BenchmarkRifeRuntime
 
+# Optional: route >1080p video through 4K -> 1080p GPU downsample -> RIFE -> NVIDIA VSR
+# Disabled by default; when enabled, 4K real frames also pass through a 1080p intermediate
+.\install.ps1 install -EnableDownsampled4kVsr -BenchmarkRifeRuntime
+
 # Status
 .\install.ps1 status
 
@@ -77,7 +81,7 @@ Generated launchers:
 | Source fps <= 60 | enabled with x2/x3/x4 selected by refresh rate and local capability, default RIFE 4.26 scale=1.0 | independent |
 | Source fps > 60 | disabled | independent |
 | Source resolution <= 1920x1080 | independent | enabled via NVIDIA d3d11vpp VSR |
-| Source resolution > 1920x1080 | independent | disabled |
+| Source resolution > 1920x1080 | default benchmark tries full-resolution 4.26 x4/x3/x2 before falling back to 4.26 scale=0.5 x2; optional downsampled x4/x3/x2 with `-EnableDownsampled4kVsr` | disabled by default; used to upscale the 1080p intermediate when the optional downsample path is enabled |
 
 The effective mpv filter order is:
 
@@ -85,11 +89,21 @@ The effective mpv filter order is:
 vapoursynth(RIFE) -> d3d11vpp(NVIDIA VSR)
 ```
 
-Low-fps 1080p content is interpolated first and then passed to driver-level upscaling. High-fps 1080p content uses VSR only. Low-fps content above 1080p uses RIFE only. RIFE picks the highest factor that does not exceed the display refresh rate, up to x4; for example, 24fps caps at x2 on 60Hz and x4 on 120Hz.
+Low-fps 1080p content is interpolated first and then passed to driver-level upscaling. High-fps 1080p content uses VSR only. Low-fps content above 1080p keeps original 4K real frames by default; the installer benchmark tries full-resolution `4.26 x4/x3/x2` first and only uses `4.26 scale=0.5 x2` if full-resolution RIFE fails. RIFE picks the highest factor that does not exceed the display refresh rate, up to x4; for example, 24fps caps at x2 on 60Hz and x4 on 120Hz.
+
+The normal RIFE path prefers `vs_gpu_helpers.rife_yuv`, which keeps YUV/RGB conversion and RIFE input/output on the CUDA/TensorRT path. If the helper is unavailable, the scripts fall back to standard `vsrife + core.resize.Bicubic`. Common HDR10 YUV420P10 / BT.2020 NCL frame props are preserved, but RIFE itself is not a linear-light HDR-aware interpolation algorithm.
+
+`-EnableDownsampled4kVsr` enables a performance-first 4K path:
+
+```text
+4K source -> GPU downsample to 1080p -> RIFE 4.26 -> NVIDIA VSR -> display size
+```
+
+This can make 4K 24fps x4 viable on the tested RTX 4080, but real frames also pass through the 1080p intermediate, so original 4K high-frequency detail is not preserved. It is disabled by default.
 
 RIFE uses TensorRT with a patched mixed-precision policy by default. The installer patches upstream `vsrife` so TensorRT uses `use_explicit_typing=False` plus `enabled_precisions={torch.float16, torch.float32}` instead of `use_explicit_typing=True`; this keeps FP16 throughput while allowing FP32 accumulation where TensorRT needs it, avoiding optical-flow overflow artifacts seen on fast motion and RTX 50-series / Blackwell systems.
 
-During installation, the script also precompiles common RIFE TensorRT engines for 720p, 1080p, and 4K with both bundled RIFE profiles. This avoids the long first-playback TensorRT build pause. 4K engine builds can take several minutes even on high-end GPUs; use `-SkipRifeTrtPrecompile` when you need a faster install and accept the first-playback compile delay.
+During installation, the script also precompiles common RIFE TensorRT engines for 720p, 1080p, and 4K with the bundled full-resolution and fallback profiles. If `-EnableDownsampled4kVsr` is set, it also precompiles the downsampled 4K profiles. This avoids the long first-playback TensorRT build pause. 4K engine builds can take several minutes even on high-end GPUs; use `-SkipRifeTrtPrecompile` when you need a faster install and accept the first-playback compile delay.
 
 `config/mpv/runtime.conf` controls runtime policy. Set `display_refresh`, `vsr_target_w`, and `vsr_target_h` there to pin refresh rate and VSR target size on multi-monitor systems. The default local capability caps are `max_factor_720`, `max_factor_1080`, and `max_factor_4k`; the default profile fields are `rife_model_720`, `rife_model_1080`, and `rife_model_4k`, normally kept at `4.26`. With `-BenchmarkRifeRuntime`, the installer tests 720p/1080p/4K 24fps synthetic clips with 4.26 at x4/x3/x2, measuring group p99 as the total time needed for all inserted frames within one source-frame interval. A factor passes when group p99 fits inside the 24fps source-frame budget of 41.67ms. If a tier cannot pass even 4.26 x2, the installer additionally tests `4.26-half`, meaning RIFE 4.26 x2 with `scale=0.5` optical flow; when that passes, it writes that tier as `4.26-half` x2. Benchmarking uses `runtime.conf` `display_refresh` first, then the Windows current display mode refresh rate, and falls back to 60Hz only if detection fails.
 
@@ -97,7 +111,7 @@ The RIFE VapourSynth queue defaults to `rife_buffered_frames=12` and `rife_concu
 
 ## Keybindings
 
-- `F9` cycles RIFE modes auto/default x4 -> 4.26 x3 -> 4.26 x2 -> 4.26 x2 scale=0.5 -> off; the effective factor is still limited by display refresh and `runtime.conf` capability caps.
+- `F9` cycles RIFE modes auto/default x4 -> 4.26 x3 -> 4.26 x2 -> 4K downsample+VSR when enabled, otherwise 4.26 x2 scale=0.5 -> off; the effective factor is still limited by display refresh and `runtime.conf` capability caps.
 - `F10` toggles danmaku visibility.
 - `Shift+F10` opens the danmaku settings panel.
 - `Ctrl+F10` opens manual danmaku search.
@@ -147,6 +161,8 @@ windows-jellyfin-mpv-rife/
 │   │   ├── runtime.conf.example
 │   │   ├── rife-4.26.vpy.example
 │   │   ├── rife-4.26-half-x2.vpy.example
+│   │   ├── rife-4.26-down1080-x{2,3,4}.vpy.example
+│   │   ├── vs_gpu_helpers.py.example
 │   │   ├── autorife.lua.example
 │   │   ├── autovsr.lua.example
 │   │   └── shim-conf.json.example

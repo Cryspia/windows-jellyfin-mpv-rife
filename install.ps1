@@ -7,7 +7,8 @@ param(
     [switch]$PurgeConfig,
     [switch]$EnableGlslUpscaleFallback,
     [switch]$SkipRifeTrtPrecompile,
-    [switch]$BenchmarkRifeRuntime
+    [switch]$BenchmarkRifeRuntime,
+    [switch]$EnableDownsampled4kVsr
 )
 
 $ErrorActionPreference = "Stop"
@@ -220,15 +221,19 @@ function Initialize-Config {
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "mpv.conf.example") (Join-Path $MpvConfigDir "mpv.conf")
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "input.conf.example") (Join-Path $MpvConfigDir "input.conf")
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "runtime.conf.example") (Join-Path $MpvConfigDir "runtime.conf")
-    Copy-ExampleIfMissing (Join-Path $ExamplesDir "rife-4.26.vpy.example") (Join-Path $MpvConfigDir "rife-4.26.vpy")
+    Copy-Item -LiteralPath (Join-Path $ExamplesDir "rife-4.26.vpy.example") -Destination (Join-Path $MpvConfigDir "rife-4.26.vpy") -Force
     foreach ($name in @(
         "rife-4.26-x2.vpy",
         "rife-4.26-x3.vpy",
         "rife-4.26-x4.vpy",
-        "rife-4.26-half-x2.vpy"
+        "rife-4.26-half-x2.vpy",
+        "rife-4.26-down1080-x2.vpy",
+        "rife-4.26-down1080-x3.vpy",
+        "rife-4.26-down1080-x4.vpy"
     )) {
-        Copy-ExampleIfMissing (Join-Path $ExamplesDir "$name.example") (Join-Path $MpvConfigDir $name)
+        Copy-Item -LiteralPath (Join-Path $ExamplesDir "$name.example") -Destination (Join-Path $MpvConfigDir $name) -Force
     }
+    Copy-Item -LiteralPath (Join-Path $ExamplesDir "vs_gpu_helpers.py.example") -Destination (Join-Path $MpvConfigDir "vs_gpu_helpers.py") -Force
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "shim-conf.json.example") (Join-Path $ShimConfigDir "conf.json")
     Ensure-Directory (Join-Path $MpvConfigDir "scripts")
     Copy-Item -LiteralPath (Join-Path $ExamplesDir "autorife.lua.example") -Destination (Join-Path $MpvConfigDir "scripts\autorife.lua") -Force
@@ -242,6 +247,16 @@ function Initialize-Config {
         rife_model_4k = "4.26"
         rife_buffered_frames = "12"
         rife_concurrent_frames = "4"
+        enable_4k_downsample_vsr = "no"
+    }
+    if ($EnableDownsampled4kVsr) {
+        Set-RuntimeConfigValues @{
+            enable_4k_downsample_vsr = "yes"
+            rife_model_4k = "4.26-down1080"
+            max_factor_4k = "4"
+        }
+    } else {
+        Set-RuntimeConfigValues @{ enable_4k_downsample_vsr = "no" }
     }
 
     $shaderSource = Join-Path $AssetsDir "shaders\FSRCNNX_x2_8-0-4-1.glsl"
@@ -276,9 +291,9 @@ function Update-MpvRuntimePolicyConfig {
             $content = $content -replace '(?m)^F9\s+cycle-values\s+vf.*\r?\n?', ''
             $content = $content -replace '(?m)^# F9 cycles RIFE modes manually:.*\r?\n?', ''
             $content = $content -replace '(?m)^# F9 is handled by scripts/autorife\.lua:.*$',
-                '# F9 is handled by scripts/autorife.lua: auto/default x4 -> 4.26 x3 -> 4.26 x2 -> 4.26 x2 scale=0.5 -> off.'
+                '# F9 is handled by scripts/autorife.lua: auto/default x4 -> 4.26 x3 -> 4.26 x2 -> 4K downsample+VSR or 4.26 x2 scale=0.5 -> off.'
             if ($content -notmatch 'autorife\.lua') {
-                $content = "# F9 is handled by scripts/autorife.lua: auto/default x4 -> 4.26 x3 -> 4.26 x2 -> 4.26 x2 scale=0.5 -> off.`r`n" + $content
+                $content = "# F9 is handled by scripts/autorife.lua: auto/default x4 -> 4.26 x3 -> 4.26 x2 -> 4K downsample+VSR or 4.26 x2 scale=0.5 -> off.`r`n" + $content
             }
             Set-Content -LiteralPath $inputConf -Value $content.TrimEnd() -Encoding UTF8
         }
@@ -349,7 +364,10 @@ function Configure-RifeTensorRtForGpu {
         "rife-4.26-x2.vpy",
         "rife-4.26-x3.vpy",
         "rife-4.26-x4.vpy",
-        "rife-4.26-half-x2.vpy"
+        "rife-4.26-half-x2.vpy",
+        "rife-4.26-down1080-x2.vpy",
+        "rife-4.26-down1080-x3.vpy",
+        "rife-4.26-down1080-x4.vpy"
     )) {
         Set-RifeTensorRtInFile (Join-Path $MpvConfigDir $name) $true
     }
@@ -390,6 +408,10 @@ function Update-VsrifeTensorRtPrecision {
     if (Test-Path $trtCache) {
         Write-Warn "Removing existing RIFE TensorRT engine cache so engines rebuild with mixed precision"
         Remove-Item -LiteralPath $trtCache -Recurse -Force
+    }
+    $vsrifeModelDir = Join-Path $PythonDir "Lib\site-packages\vsrife\models"
+    if (Test-Path $vsrifeModelDir) {
+        Get-ChildItem -LiteralPath $vsrifeModelDir -Filter "*.ts" -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -1721,7 +1743,10 @@ function Invoke-MpvRifePrecompile {
         "rife-4.26-x2.vpy",
         "rife-4.26-x3.vpy",
         "rife-4.26-x4.vpy",
-        "rife-4.26-half-x2.vpy"
+        "rife-4.26-half-x2.vpy",
+        "rife-4.26-down1080-x2.vpy",
+        "rife-4.26-down1080-x3.vpy",
+        "rife-4.26-down1080-x4.vpy"
     )) {
         $src = Join-Path $MpvConfigDir $name
         $dst = Join-Path $precompileConfigDir $name
@@ -1730,6 +1755,10 @@ function Invoke-MpvRifePrecompile {
             $vpyContent = $vpyContent -replace 'trt_cache_dir\s*=\s*Path\(__file__\)\.resolve\(\)\.parents\[1\]\s*/\s*"cache"\s*/\s*"rife-trt"', "trt_cache_dir = Path(r'$trtCacheForVpy')"
             Set-Content -LiteralPath $dst -Value $vpyContent -Encoding UTF8
         }
+    }
+    $helperSource = Join-Path $MpvConfigDir "vs_gpu_helpers.py"
+    if ((Test-Path $helperSource) -and -not $DryRun) {
+        Copy-Item -LiteralPath $helperSource -Destination (Join-Path $precompileConfigDir "vs_gpu_helpers.py") -Force
     }
     $stdoutPath = Join-Path $LogsDir ("rife-precompile-" + [Guid]::NewGuid().ToString("N") + ".out.log")
     $stderrPath = Join-Path $LogsDir ("rife-precompile-" + [Guid]::NewGuid().ToString("N") + ".err.log")
@@ -1784,9 +1813,19 @@ function Precompile-RifeTensorRtEngines {
         "rife-4.26-x4.vpy",
         "rife-4.26-half-x2.vpy"
     )
+    if ($EnableDownsampled4kVsr) {
+        $vpyFiles += @(
+            "rife-4.26-down1080-x2.vpy",
+            "rife-4.26-down1080-x3.vpy",
+            "rife-4.26-down1080-x4.vpy"
+        )
+    }
     foreach ($resolution in $resolutions) {
         $sample = New-RifePrecompileSample $resolution.Width $resolution.Height
         foreach ($vpy in $vpyFiles) {
+            if (($vpy -match "down1080") -and ($resolution.Height -le 1080)) {
+                continue
+            }
             Invoke-MpvRifePrecompile $sample $vpy $resolution.Label
         }
     }
@@ -1951,7 +1990,11 @@ function Invoke-RifeRuntimeBenchmarkCase {
         [int]$Height,
         [int]$Factor,
         [string]$Model = "4.26",
-        [double]$Scale = 1.0
+        [double]$Scale = 1.0,
+        [switch]$UseGpuYuv,
+        [switch]$DownsampleTo1080,
+        [double]$BudgetMs = 41.667,
+        [int]$TimeoutSeconds = 240
     )
 
     $pythonExe = Join-Path $PythonDir "python.exe"
@@ -1961,44 +2004,69 @@ function Invoke-RifeRuntimeBenchmarkCase {
 
     $scriptPath = Join-Path $CacheDir ("rife-benchmark-" + [Guid]::NewGuid().ToString("N") + ".py")
     $cachePath = (Join-Path $CacheDir "rife-trt").Replace("\", "/")
+    $mpvConfigPath = $MpvConfigDir.Replace("\", "\\")
+    $useGpuYuvPy = if ($UseGpuYuv) { "True" } else { "False" }
+    $downsamplePy = if ($DownsampleTo1080) { "True" } else { "False" }
     $code = @"
 import json
 import statistics
 import time
 from pathlib import Path
+import sys
 
 import vapoursynth as vs
 from vsrife import rife
 
+sys.path.insert(0, r"$mpvConfigPath")
 core = vs.core
 cache = Path(r"$cachePath")
 cache.mkdir(parents=True, exist_ok=True)
 
-clip = core.std.BlankClip(width=$Width, height=$Height, format=vs.RGBH, length=240, fpsnum=24, fpsden=1)
-clip = rife(
-    clip,
-    model="$Model",
-    scale=$Scale,
-    factor_num=$Factor,
-    factor_den=1,
-    auto_download=False,
-    trt=True,
-    trt_cache_dir=str(cache),
-)
+clip = core.std.BlankClip(width=$Width, height=$Height, format=vs.YUV420P10, length=320, fpsnum=24, fpsden=1, color=[512, 512, 512])
+if ${downsamplePy}:
+    from vs_gpu_helpers import downsample_yuv420p10_gpu
+    target_h = 1080
+    target_w = ((clip.width * target_h) // clip.height) & ~1
+    clip = downsample_yuv420p10_gpu(clip, width=target_w, height=target_h)
 
-for group in range(12):
+if ${useGpuYuvPy}:
+    from vs_gpu_helpers import rife_yuv
+    clip = rife_yuv(clip, model="$Model", scale=$Scale, factor_num=$Factor, factor_den=1)
+else:
+    clip = core.resize.Bicubic(clip, format=vs.RGBH, matrix_in_s="709")
+    clip = rife(
+        clip,
+        model="$Model",
+        scale=$Scale,
+        factor_num=$Factor,
+        factor_den=1,
+        auto_download=False,
+        trt=True,
+        trt_cache_dir=str(cache),
+    )
+    clip = core.resize.Bicubic(clip, format=vs.YUV420P10, matrix_s="709")
+
+for group in range(8):
     base = group * $Factor
     for offset in range($Factor):
         clip.get_frame(base + offset)
 
 samples = []
-for group in range(12, 72):
+early_failed = False
+for group in range(8, 32):
     base = group * $Factor
     clip.get_frame(base)
     t0 = time.perf_counter()
     for offset in range(1, $Factor):
         clip.get_frame(base + offset)
     samples.append((time.perf_counter() - t0) * 1000.0)
+    if len(samples) >= 6:
+        quick = sorted(samples)
+        quick_p99 = quick[-1]
+        quick_mean = statistics.fmean(samples)
+        if quick_p99 > ($BudgetMs * 1.35) and quick_mean > ($BudgetMs * 1.10):
+            early_failed = True
+            break
 
 ordered = sorted(samples)
 p99 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.99))]
@@ -2011,24 +2079,41 @@ print(json.dumps({
     "group_p99_ms": p99,
     "group_mean_ms": statistics.fmean(samples),
     "inserted_frames_per_group": $Factor - 1,
+    "samples": len(samples),
+    "early_failed": early_failed,
 }))
 "@
 
     if ($DryRun) {
-        Write-Host "DRY-RUN: benchmark RIFE $Model scale=$Scale $Width x $Height factor $Factor"
+        Write-Host "DRY-RUN: benchmark RIFE $Model scale=$Scale $Width x $Height factor $Factor gpuYuv=$UseGpuYuv down1080=$DownsampleTo1080"
         return @{ width = $Width; height = $Height; factor = $Factor; model = $Model; scale = $Scale; group_p99_ms = 0.0; group_mean_ms = 0.0 }
     }
 
     Set-PortablePythonEnvironment
     Set-Content -LiteralPath $scriptPath -Value $code -Encoding UTF8
+    $stdoutPath = Join-Path $LogsDir ("rife-benchmark-" + [Guid]::NewGuid().ToString("N") + ".out.log")
+    $stderrPath = Join-Path $LogsDir ("rife-benchmark-" + [Guid]::NewGuid().ToString("N") + ".err.log")
     try {
-        $output = & $pythonExe $scriptPath 2>&1
-        if ($LASTEXITCODE -ne 0) {
+        Ensure-Directory $LogsDir
+        $p = Start-Process -FilePath $pythonExe -ArgumentList @($scriptPath) -WorkingDirectory $ProjectRoot -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            throw "benchmark timed out after ${TimeoutSeconds}s: RIFE $Model scale=$Scale ${Width}x$Height x$Factor gpuYuv=$UseGpuYuv down1080=$DownsampleTo1080"
+        }
+        $output = @()
+        if (Test-Path $stdoutPath) { $output += Get-Content -LiteralPath $stdoutPath }
+        if (Test-Path $stderrPath) { $output += Get-Content -LiteralPath $stderrPath }
+        if ($p.ExitCode -ne 0) {
             throw "benchmark python failed: $output"
         }
-        return (($output | Select-Object -Last 1) | ConvertFrom-Json)
+        $jsonLine = $output | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1
+        if (-not $jsonLine) {
+            throw "benchmark did not return JSON: $output"
+        }
+        return ($jsonLine | ConvertFrom-Json)
     } finally {
         Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -2055,13 +2140,18 @@ function Measure-RifeRuntimeCapability {
     foreach ($tier in $tiers) {
         $best = 0
         $model = "4.26"
+        $useDownsample4k = $EnableDownsampled4kVsr -and ($tier.Height -gt 1080)
+        if ($useDownsample4k) {
+            $model = "4.26-down1080"
+        }
         $sourceBudgetMs = 1000.0 / 24.0
         foreach ($factor in @(4, 3, 2)) {
             if ((24 * $factor) -gt ($refresh + 0.01)) {
                 continue
             }
-            $result = Invoke-RifeRuntimeBenchmarkCase $tier.Width $tier.Height $factor "4.26" 1.0
-            Write-Host ("{0} 4.26 x{1}: group-p99={2:n2}ms, source-budget={3:n2}ms" -f $tier.Label, $factor, [double]$result.group_p99_ms, $sourceBudgetMs)
+            $result = Invoke-RifeRuntimeBenchmarkCase $tier.Width $tier.Height $factor "4.26" 1.0 -UseGpuYuv -DownsampleTo1080:$useDownsample4k -BudgetMs $sourceBudgetMs
+            $labelModel = if ($useDownsample4k) { "4.26 down1080" } else { "4.26 gpu-yuv" }
+            Write-Host ("{0} {1} x{2}: group-p99={3:n2}ms, source-budget={4:n2}ms" -f $tier.Label, $labelModel, $factor, [double]$result.group_p99_ms, $sourceBudgetMs)
             if ([double]$result.group_p99_ms -le $sourceBudgetMs) {
                 $best = $factor
                 break
@@ -2069,7 +2159,7 @@ function Measure-RifeRuntimeCapability {
         }
         if ($best -lt 2) {
             if ((24 * 2) -le ($refresh + 0.01)) {
-                $result = Invoke-RifeRuntimeBenchmarkCase $tier.Width $tier.Height 2 "4.26" 0.5
+                $result = Invoke-RifeRuntimeBenchmarkCase $tier.Width $tier.Height 2 "4.26" 0.5 -UseGpuYuv -BudgetMs $sourceBudgetMs
                 Write-Host ("{0} 4.26 x2 scale=0.5 fallback: group-p99={1:n2}ms, source-budget={2:n2}ms" -f $tier.Label, [double]$result.group_p99_ms, $sourceBudgetMs)
                 if ([double]$result.group_p99_ms -le $sourceBudgetMs) {
                     $best = 2

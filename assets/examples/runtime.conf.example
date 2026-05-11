@@ -8,6 +8,12 @@ display_refresh=
 vsr_target_w=
 vsr_target_h=
 
+# Optional 4K path: downsample >1080p sources to 1080p, run RIFE there,
+# then let NVIDIA VSR upscale the stream back to the display size.
+# Default is no, which keeps original 4K real frames and uses 4.26-half as
+# the final manual/benchmark fallback.
+enable_4k_downsample_vsr=no
+
 # Maximum RIFE factor allowed by local GPU capability per source-height tier.
 # The effective factor is still capped by display_refresh / source_fps.
 max_factor_720=4

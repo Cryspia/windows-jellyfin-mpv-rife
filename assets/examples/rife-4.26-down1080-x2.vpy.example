@@ -8,11 +8,15 @@ trt_cache_dir = Path(__file__).resolve().parents[1] / "cache" / "rife-trt"
 trt_cache_dir.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+target_h = 1080
+target_w = ((clip.width * target_h) // clip.height) & ~1
+
 try:
-    from vs_gpu_helpers import rife_yuv
+    from vs_gpu_helpers import downsample_yuv420p10_gpu, rife_yuv
     if clip.format.id != int(vs.YUV420P10):
         clip = core.resize.Point(clip, format=vs.YUV420P10)
-    clip = rife_yuv(clip, model="4.26", scale=1.0, factor_num=3, factor_den=1)
+    clip = downsample_yuv420p10_gpu(clip, width=target_w, height=target_h)
+    clip = rife_yuv(clip, model="4.26", scale=1.0, factor_num=2, factor_den=1)
 except Exception as exc:
     from vsrife import rife
     _MATRIX_NAME = {1: "709", 6: "170m", 7: "240m", 9: "2020ncl"}
@@ -21,12 +25,12 @@ except Exception as exc:
     except Exception:
         _m = 1
     _mtx = _MATRIX_NAME.get(_m, "709")
-    clip = core.resize.Bicubic(clip, format=vs.RGBH, matrix_in_s=_mtx)
+    clip = core.resize.Bicubic(clip, width=target_w, height=target_h, format=vs.RGBH, matrix_in_s=_mtx)
     clip = rife(
         clip,
         model="4.26",
         scale=1.0,
-        factor_num=3,
+        factor_num=2,
         factor_den=1,
         auto_download=False,
         trt=True,
@@ -35,5 +39,4 @@ except Exception as exc:
     clip = core.resize.Bicubic(clip, format=vs.YUV420P10, matrix_s=_mtx)
 
 clip.set_output()
-
 
