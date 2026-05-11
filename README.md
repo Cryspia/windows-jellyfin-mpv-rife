@@ -91,7 +91,7 @@ RIFE uses TensorRT with a patched mixed-precision policy by default. The install
 
 During installation, the script also precompiles common RIFE TensorRT engines for 720p, 1080p, and 4K with both bundled RIFE profiles. This avoids the long first-playback TensorRT build pause. 4K engine builds can take several minutes even on high-end GPUs; use `-SkipRifeTrtPrecompile` when you need a faster install and accept the first-playback compile delay.
 
-`config/mpv/runtime.conf` controls runtime policy. Set `display_refresh`, `vsr_target_w`, and `vsr_target_h` there to pin refresh rate and VSR target size on multi-monitor systems. The default local capability caps are `max_factor_720`, `max_factor_1080`, and `max_factor_4k`; with `-BenchmarkRifeRuntime`, the installer tests 720p/1080p/4K 24fps synthetic clips at x4/x3/x2, warms and reuses TRT cache, and writes the highest p99-safe factor for each tier.
+`config/mpv/runtime.conf` controls runtime policy. Set `display_refresh`, `vsr_target_w`, and `vsr_target_h` there to pin refresh rate and VSR target size on multi-monitor systems. The default local capability caps are `max_factor_720`, `max_factor_1080`, and `max_factor_4k`; with `-BenchmarkRifeRuntime`, the installer tests 720p/1080p/4K 24fps synthetic clips at x4/x3/x2, warms and reuses TRT cache, and writes the highest p99-safe factor for each tier. Benchmarking uses `runtime.conf` `display_refresh` first, then the Windows current display mode refresh rate, and falls back to 60Hz only if detection fails.
 
 ## Keybindings
 

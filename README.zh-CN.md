@@ -91,7 +91,7 @@ RIFE 默认使用经过 patch 的 TensorRT 混合精度策略。安装器会 pat
 
 安装时脚本还会用两套内置 RIFE 配置预编译常见 720p、1080p 和 4K TensorRT engine，避免第一次播放时长时间编译导致用户误以为卡死。4K engine 即使在高端显卡上也可能需要数分钟编译；如果想缩短安装时间并接受首次播放时编译，可使用 `-SkipRifeTrtPrecompile`。
 
-`config/mpv/runtime.conf` 控制运行时策略。可在其中手动设置 `display_refresh`、`vsr_target_w`、`vsr_target_h`，用于多显示器环境下固定刷新率和 VSR 目标尺寸。默认三档能力上限是 `max_factor_720`、`max_factor_1080`、`max_factor_4k`；使用 `-BenchmarkRifeRuntime` 安装时，脚本会用 720p/1080p/4K 的 24fps 合成样片测试 x4/x3/x2，预热并复用 TRT cache 后按 p99 帧时间是否满足预算写回这三档。
+`config/mpv/runtime.conf` 控制运行时策略。可在其中手动设置 `display_refresh`、`vsr_target_w`、`vsr_target_h`，用于多显示器环境下固定刷新率和 VSR 目标尺寸。默认三档能力上限是 `max_factor_720`、`max_factor_1080`、`max_factor_4k`；使用 `-BenchmarkRifeRuntime` 安装时，脚本会用 720p/1080p/4K 的 24fps 合成样片测试 x4/x3/x2，预热并复用 TRT cache 后按 p99 帧时间是否满足预算写回这三档。benchmark 会优先使用 `runtime.conf` 中的 `display_refresh`，为空时读取 Windows 当前显示模式的刷新率，仍失败才回退到 60Hz。
 
 ## 按键
 

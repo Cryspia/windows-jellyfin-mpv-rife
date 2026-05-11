@@ -1808,13 +1808,93 @@ function Set-RuntimeConfigValues {
     Set-Content -LiteralPath $path -Value $lines -Encoding UTF8
 }
 
+function Get-WindowsDisplayRefresh {
+    try {
+        $typeName = "PortableDisplayMode"
+        if (-not ($typeName -as [type])) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class PortableDisplayMode {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+    public struct DEVMODE {
+        private const int CCHDEVICENAME = 32;
+        private const int CCHFORMNAME = 32;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = CCHDEVICENAME)]
+        public string dmDeviceName;
+        public short dmSpecVersion;
+        public short dmDriverVersion;
+        public short dmSize;
+        public short dmDriverExtra;
+        public int dmFields;
+        public int dmPositionX;
+        public int dmPositionY;
+        public int dmDisplayOrientation;
+        public int dmDisplayFixedOutput;
+        public short dmColor;
+        public short dmDuplex;
+        public short dmYResolution;
+        public short dmTTOption;
+        public short dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = CCHFORMNAME)]
+        public string dmFormName;
+        public short dmLogPixels;
+        public int dmBitsPerPel;
+        public int dmPelsWidth;
+        public int dmPelsHeight;
+        public int dmDisplayFlags;
+        public int dmDisplayFrequency;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Ansi)]
+    public static extern bool EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
+
+    public static DEVMODE Current() {
+        DEVMODE mode = new DEVMODE();
+        mode.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+        EnumDisplaySettings(null, -1, ref mode);
+        return mode;
+    }
+}
+"@
+        }
+        $mode = [PortableDisplayMode]::Current()
+        if ($mode.dmDisplayFrequency -gt 1) {
+            return [pscustomobject]@{
+                Refresh = [double]$mode.dmDisplayFrequency
+                Width = [int]$mode.dmPelsWidth
+                Height = [int]$mode.dmPelsHeight
+                Source = "Windows current display mode"
+            }
+        }
+    } catch {
+        Write-Warn "Could not read Windows display refresh: $($_.Exception.Message)"
+    }
+    return $null
+}
+
 function Get-ConfiguredDisplayRefresh {
     $conf = Get-RuntimeConfigMap
     $configured = 0.0
     if ($conf.Contains("display_refresh") -and [double]::TryParse([string]$conf["display_refresh"], [ref]$configured) -and $configured -gt 0) {
-        return $configured
+        return [pscustomobject]@{
+            Refresh = $configured
+            Width = $null
+            Height = $null
+            Source = "runtime.conf display_refresh"
+        }
     }
-    return 60.0
+    $detected = Get-WindowsDisplayRefresh
+    if ($detected) {
+        return $detected
+    }
+    return [pscustomobject]@{
+        Refresh = 60.0
+        Width = $null
+        Height = $null
+        Source = "fallback default"
+    }
 }
 
 function Invoke-RifeRuntimeBenchmarkCase {
@@ -1900,7 +1980,13 @@ function Measure-RifeRuntimeCapability {
     }
 
     Write-Step "Benchmarking local RIFE runtime capability"
-    $refresh = Get-ConfiguredDisplayRefresh
+    $refreshInfo = Get-ConfiguredDisplayRefresh
+    $refresh = [double]$refreshInfo.Refresh
+    if ($refreshInfo.Width -and $refreshInfo.Height) {
+        Write-Host ("Using display refresh {0:n2}Hz from {1} ({2}x{3})." -f $refresh, $refreshInfo.Source, $refreshInfo.Width, $refreshInfo.Height)
+    } else {
+        Write-Host ("Using display refresh {0:n2}Hz from {1}." -f $refresh, $refreshInfo.Source)
+    }
     $tiers = @(
         @{ Key = "max_factor_720"; Label = "<=720p"; Width = 1280; Height = 720 },
         @{ Key = "max_factor_1080"; Label = "720p<video<=1080p"; Width = 1920; Height = 1080 },
