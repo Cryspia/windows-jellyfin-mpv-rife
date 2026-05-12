@@ -91,7 +91,7 @@ vapoursynth(RIFE) -> d3d11vpp(NVIDIA VSR)
 
 也就是说，低帧率 1080p 内容会先插帧再交给 NVIDIA 驱动级超分；高帧率 1080p 内容只做超分；高于 1080p 的低帧率内容默认保留原始 4K real frames，安装 benchmark 会先尝试全分辨率 `4.26 x4/x3/x2`，都失败才用 `4.26 scale=0.5 x2` 兜底。RIFE 会在“不超过显示器刷新率”的前提下选择最高倍率，最高 x4；例如 24fps 在 60Hz 下最多 x2，在 120Hz 下最多 x4。
 
-RIFE 的普通路径优先使用 `vs_gpu_helpers.rife_yuv`，把 YUV/RGB 色彩转换和 RIFE 输入/输出放到 CUDA/TensorRT 管线里。GPU 路径只对白名单矩阵和 `limited/full` range 启用；YUV422/YUV444 会先在 VapourSynth 侧规范化成 YUV420P10，避免把随后会被丢弃的色度平面传进 PCIe/CUDA 路径。如果 GPU helper 不可用，会回退到标准 `vsrife + core.resize.Bicubic` CPU 色转路径，而不是直接关闭插帧；如果逐帧颜色元数据不在白名单内，helper 会拒绝处理，避免静默产生错误颜色。HDR10 常见的 YUV420P10 / BT.2020 NCL frame props 会保留，但 RIFE 本身不是线性光 HDR-aware 插帧算法。
+RIFE 的普通路径优先使用 `vs_gpu_helpers.rife_yuv`，把 YUV/RGB 色彩转换和 RIFE 输入/输出放到 CUDA/TensorRT 管线里。GPU 路径只对白名单矩阵和 `limited/full` range 启用；YUV420P10、YUV422P10、YUV444P10 会按原 subsampling 进入 GPU 色转并按原 subsampling 写回插帧结果。其他位深或异常 subsampling 会先规范化到 YUV420P10。可选的 4K 下采样 + VSR 路径也会对 P10 420/422/444 保留原 subsampling；如果输入需要规范化，则使用 YUV420P10 中间流。如果 GPU helper 不可用，会回退到标准 `vsrife + core.resize.Bicubic` CPU 色转路径，而不是直接关闭插帧；如果逐帧颜色元数据不在白名单内，helper 会拒绝处理，避免静默产生错误颜色。HDR10 常见的 YUV420P10 / BT.2020 NCL frame props 会保留，但 RIFE 本身不是线性光 HDR-aware 插帧算法。
 
 `-EnableDownsampled4kVsr` 是性能优先的 4K 可选路径：
 
@@ -105,7 +105,7 @@ RIFE 默认使用经过 patch 的 TensorRT 混合精度策略。安装器会 pat
 
 安装时脚本还会用内置的全分辨率和兜底 RIFE 配置预编译常见 720p、1080p 和 4K TensorRT engine；如果启用 `-EnableDownsampled4kVsr`，也会预编译 4K 下采样 profile。这样可以避免第一次播放时长时间编译导致用户误以为卡死。4K engine 即使在高端显卡上也可能需要数分钟编译；如果想缩短安装时间并接受首次播放时编译，可使用 `-SkipRifeTrtPrecompile`。
 
-`config/mpv/runtime.conf` 控制运行时策略。可在其中手动设置 `display_refresh`、`vsr_target_w`、`vsr_target_h`，用于多显示器环境下固定刷新率和 VSR 目标尺寸。默认三档能力上限是 `max_factor_720`、`max_factor_1080`、`max_factor_4k`；默认 profile 字段是 `rife_model_720`、`rife_model_1080`、`rife_model_4k`，通常保持 `4.26`。使用 `-BenchmarkRifeRuntime` 安装时，脚本会用 720p/1080p/4K 的 24fps 合成样片测试 4.26 的 x4/x3/x2，并按一个源帧间隔内所有插帧的合计耗时计算 group p99；group p99 不超过 24fps 源帧预算 41.67ms 时，该倍率通过。如果某档连 4.26 x2 都无法通过，会额外测试 `4.26-half`，也就是 RIFE 4.26 x2 + `scale=0.5` 光流，通过时将该档默认写为 `4.26-half` x2。benchmark 会优先使用 `runtime.conf` 中的 `display_refresh`，为空时读取 Windows 当前显示模式的刷新率，仍失败才回退到 60Hz。
+`config/mpv/runtime.conf` 控制运行时策略。可在其中手动设置 `display_refresh`、`vsr_target_w`、`vsr_target_h`，用于多显示器和 VRR 环境下固定刷新率和 VSR 目标尺寸。默认三档能力上限是 `max_factor_720`、`max_factor_1080`、`max_factor_4k`；默认 profile 字段是 `rife_model_720`、`rife_model_1080`、`rife_model_4k`，通常保持 `4.26`。使用 `-BenchmarkRifeRuntime` 安装时，脚本会用 720p/1080p/4K 的 24fps 合成样片测试 4.26 的 x4/x3/x2，并按一个源帧间隔内所有插帧的合计耗时计算 group p99；group p99 不超过 24fps 源帧预算 41.67ms 时，该倍率通过。如果某档连 4.26 x2 都无法通过，会额外测试 `4.26-half`，也就是 RIFE 4.26 x2 + `scale=0.5` 光流，通过时将该档默认写为 `4.26-half` x2。benchmark 会优先使用 `runtime.conf` 中的 `display_refresh`；为空时会枚举 Windows 当前分辨率下的最高显示模式刷新率，再失败才回退到当前模式或 60Hz。运行时 mpv 仍无法可靠读取完整 VRR range，VRR 用户建议在 `runtime.conf` 明确写入面板上限，例如 `display_refresh=160`。
 
 RIFE 的 VapourSynth 队列默认使用 `rife_buffered_frames=12` 和 `rife_concurrent_frames=4`，用于减少 TensorRT 插帧的帧时间尖峰。显存紧张或想降低延迟时可以手动调低。
 

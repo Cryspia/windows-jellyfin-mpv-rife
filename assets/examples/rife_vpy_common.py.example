@@ -20,10 +20,18 @@ def _cache_dir() -> Path:
 def _gpu_input(clip: vs.VideoNode) -> vs.VideoNode:
     if clip.format is None or clip.format.color_family != vs.YUV:
         raise RuntimeError("GPU RIFE path expects YUV input")
-    if clip.format.id != int(vs.YUV420P10):
-        # Do bit-depth and chroma-subsampling normalisation before CUDA upload.
-        # On discrete GPUs this avoids sending 4:2:2/4:4:4 chroma over PCIe only
-        # to discard it inside the helper.
+
+    direct_p10 = (
+        clip.format.bits_per_sample == 10
+        and clip.format.sample_type == vs.INTEGER
+        and clip.format.subsampling_w in (0, 1)
+        and clip.format.subsampling_h in (0, 1)
+    )
+
+    if not direct_p10:
+        # 420/422/444 P10 can enter the GPU helper directly. Other bit
+        # depths or unusual subsampling are normalised first so the helper
+        # never has to reinterpret an unknown plane layout.
         clip = core.resize.Bicubic(clip, format=vs.YUV420P10)
     return clip
 
@@ -58,9 +66,20 @@ def _cpu_rife(
         trt=True,
         trt_cache_dir=str(_cache_dir()),
     )
+    out_format = vs.YUV420P10
+    if (
+        source.format is not None
+        and source.format.color_family == vs.YUV
+        and source.format.bits_per_sample == 10
+        and source.format.sample_type == vs.INTEGER
+        and source.format.subsampling_w in (0, 1)
+        and source.format.subsampling_h in (0, 1)
+    ):
+        out_format = source.format.id
+
     return core.resize.Bicubic(
         clip,
-        format=vs.YUV420P10,
+        format=out_format,
     )
 
 
@@ -82,9 +101,9 @@ def run_rife_profile(
     try:
         gpu_clip = _gpu_input(source)
         if downsample_1080:
-            from vs_gpu_helpers import downsample_yuv420p10_gpu, rife_yuv
+            from vs_gpu_helpers import downsample_yuvp10_gpu, rife_yuv
 
-            gpu_clip = downsample_yuv420p10_gpu(
+            gpu_clip = downsample_yuvp10_gpu(
                 gpu_clip,
                 width=target_w,
                 height=target_h,

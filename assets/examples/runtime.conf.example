@@ -1,7 +1,9 @@
 # Runtime policy shared by autorife.lua and autovsr.lua.
 # Empty display values use mpv auto-detection.
 
-# Manual display refresh override in Hz. Leave empty to use display-fps, then 60.
+# Manual display refresh override in Hz. Recommended for VRR/multi-monitor setups.
+# Installer benchmark can enumerate max Windows mode refresh; runtime mpv uses
+# this value first, then display-fps, then 60.
 display_refresh=
 
 # Manual VSR target size override. Useful when mpv detects the wrong monitor.

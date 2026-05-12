@@ -29,10 +29,8 @@ Public API
 
 Limitations
 -----------
-- Input must be YUV420P10. Other YUV bit-depths and subsamplings
-  (YUV420P8/16, YUV422, YUV444) should be normalised upstream via
-  `core.resize.Bicubic(format=vs.YUV420P10)` before calling us, so the
-  helper stays strict on its own input.
+- Input must be 10-bit integer YUV 4:2:0, 4:2:2, or 4:4:4. Other YUV
+  bit-depths should be normalised upstream before calling us.
 - Color matrices supported: BT.709, BT.2020 NCL, BT.601 (smpte170m).
   Chosen per-frame from the source's `_Matrix` prop. HDR PQ/HLG
   works because the matrix is the same in non-linear domain — RIFE
@@ -113,23 +111,22 @@ _MATRIX_FROM_PROP = {
 
 
 @torch.inference_mode()
-def yuv420p10_to_rgb(
+def yuvp10_to_rgb(
     y_plane: torch.Tensor,          # (H, W) uint16, 10-bit data in [0, 1023]
-    u_plane: torch.Tensor,          # (H/2, W/2) uint16
-    v_plane: torch.Tensor,          # (H/2, W/2) uint16
+    u_plane: torch.Tensor,          # chroma plane, 420/422/444 shape
+    v_plane: torch.Tensor,          # chroma plane, 420/422/444 shape
     matrix: str,
     *,
     color_range: str = "limited",
     out_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    """Convert YUV420P10 to RGB float16/float32 in [0, 1].
+    """Convert YUV P10 4:2:0 / 4:2:2 / 4:4:4 to RGB float16/float32.
 
     Returns (1, 3, H, W) tensor on the same device as the inputs.
     `color_range` is "limited" or "full" and must match the source
     `_ColorRange` metadata.
-    Uses bilinear chroma upsampling (4:2:0 → 4:4:4); a slight
-    softening vs. zimg's bicubic, but at 4K the difference is below
-    the typical noise floor of streaming sources.
+    Uses bilinear chroma upsampling when needed; 4:4:4 input already
+    has full-resolution chroma and passes through at native chroma size.
     """
     device = y_plane.device
     y_scale, y_offset, uv_scale, uv_offset = _RANGE_CONSTS_10[color_range]
@@ -137,12 +134,14 @@ def yuv420p10_to_rgb(
     u = (u_plane.to(torch.float32) - uv_offset) / uv_scale
     v = (v_plane.to(torch.float32) - uv_offset) / uv_scale
 
-    # Chroma upsample 4:2:0 → 4:4:4. F.interpolate operates on (N, C, H, W).
+    # Chroma upsample to 4:4:4. F.interpolate operates on (N, C, H, W).
     h, w = y.shape
-    u = F.interpolate(u[None, None], size=(h, w),
-                      mode="bilinear", align_corners=False)[0, 0]
-    v = F.interpolate(v[None, None], size=(h, w),
-                      mode="bilinear", align_corners=False)[0, 0]
+    if u.shape != (h, w):
+        u = F.interpolate(u[None, None], size=(h, w),
+                          mode="bilinear", align_corners=False)[0, 0]
+    if v.shape != (h, w):
+        v = F.interpolate(v[None, None], size=(h, w),
+                          mode="bilinear", align_corners=False)[0, 0]
 
     # Matrix multiply. Stack into (H, W, 3) [Y, U, V], then dot.
     yuv = torch.stack([y, u, v], dim=-1)  # (H, W, 3)
@@ -161,30 +160,34 @@ def yuv420p10_to_rgb(
 
 
 @torch.inference_mode()
-def rgb_to_yuv420p10(
+def rgb_to_yuvp10(
     rgb: torch.Tensor,           # (1, 3, H, W) float16/float32 in [0, 1]
     matrix: str,
     *,
     color_range: str = "limited",
+    subsampling_w: int = 1,
+    subsampling_h: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Convert RGB to YUV420P10 planes (int16, bit-equivalent to uint16
-    for 10-bit values in [0, 1023]).
+    """Convert RGB to YUV P10 planes matching the requested subsampling.
 
-    Returns (y, u, v) tensors on the same device as `rgb`. Chroma
-    downsample is a 2×2 average pool (matches center-aligned chroma
-    siting closely enough — same approximation vapoursynth's bicubic
-    is making in the other direction). `color_range` should match
-    whatever the source had, so mpv's downstream display path
-    interprets it correctly."""
+    Returns (y, u, v) tensors on the same device as `rgb`. Chroma is
+    downsampled with an average pool for 4:2:0 / 4:2:2 and preserved for
+    4:4:4. `color_range` should match whatever the source had, so mpv's
+    downstream display path interprets it correctly."""
     device = rgb.device
     rgb_f = rgb[0].permute(1, 2, 0).to(torch.float32)  # (H, W, 3)
     m = _RGB2YUV_MATRIX[matrix].to(device)             # (3, 3) [Y,U,V] x [R,G,B]
     yuv = torch.einsum("hwc,rc->hwr", rgb_f, m)        # (H, W, 3)
     y, u, v = yuv[..., 0], yuv[..., 1], yuv[..., 2]
 
-    # Chroma downsample 4:4:4 → 4:2:0 via 2×2 mean pool.
-    u = F.avg_pool2d(u[None, None], kernel_size=2, stride=2)[0, 0]
-    v = F.avg_pool2d(v[None, None], kernel_size=2, stride=2)[0, 0]
+    # Chroma downsample 4:4:4 → requested subsampling via mean pool.
+    k_h = 1 << subsampling_h
+    k_w = 1 << subsampling_w
+    if k_h > 1 or k_w > 1:
+        u = F.avg_pool2d(u[None, None], kernel_size=(k_h, k_w),
+                         stride=(k_h, k_w))[0, 0]
+        v = F.avg_pool2d(v[None, None], kernel_size=(k_h, k_w),
+                         stride=(k_h, k_w))[0, 0]
 
     # Quantize to 10-bit using the matching range's constants. Output
     # dtype is int16, not uint16: 10-bit YUV values [0, 1023] fit
@@ -198,26 +201,43 @@ def rgb_to_yuv420p10(
     return y_q, u_q, v_q
 
 
+# Backward-compatible names used by older ad-hoc test scripts.
+yuv420p10_to_rgb = yuvp10_to_rgb
+
+
+def rgb_to_yuv420p10(
+    rgb: torch.Tensor,
+    matrix: str,
+    *,
+    color_range: str = "limited",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return rgb_to_yuvp10(
+        rgb,
+        matrix,
+        color_range=color_range,
+        subsampling_w=1,
+        subsampling_h=1,
+    )
+
+
 # =============================================================================
 # Frame ↔ tensor helpers (CPU-side glue)
 # =============================================================================
 
-def _frame_yuv420p10_to_planes(
+def _frame_yuvp10_to_planes(
     frame: vs.VideoFrame, device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Pull the three planes off a YUV420P10 frame as uint16 tensors
-    on the GPU. With Grace-Blackwell unified memory the .to(device)
-    call is essentially a metadata move — no PCIe traffic involved."""
+    """Pull the three planes off a YUV P10 frame as uint16 tensors."""
     y = torch.from_numpy(np.asarray(frame[0])).to(device, non_blocking=True)
     u = torch.from_numpy(np.asarray(frame[1])).to(device, non_blocking=True)
     v = torch.from_numpy(np.asarray(frame[2])).to(device, non_blocking=True)
     return y, u, v
 
 
-def _planes_to_frame_yuv420p10(
+def _planes_to_frame_yuvp10(
     y: torch.Tensor, u: torch.Tensor, v: torch.Tensor, dst_frame: vs.VideoFrame,
 ) -> vs.VideoFrame:
-    """Write three int16 plane tensors back into a YUV420P10 frame.
+    """Write three int16 plane tensors back into a YUV P10 frame.
 
     Same int16-buffer-alias trick fsrcnnx_cudnn.vsfunc uses: vapoursynth
     plane buffers are uint16 numpy views; we reinterpret each as int16
@@ -234,6 +254,10 @@ def _planes_to_frame_yuv420p10(
     u_dst_t.copy_(u, non_blocking=False)
     v_dst_t.copy_(v, non_blocking=False)
     return dst_frame
+
+
+_frame_yuv420p10_to_planes = _frame_yuvp10_to_planes
+_planes_to_frame_yuv420p10 = _planes_to_frame_yuvp10
 
 
 def _detect_matrix(clip: vs.VideoNode) -> str:
@@ -398,9 +422,12 @@ def rife_yuv(
     (built by install.sh's warmup step) are reused as-is."""
     if clip.format is None or clip.format.color_family != vs.YUV:
         raise vs.Error("rife_yuv: input must be YUV")
-    if clip.format.id != int(vs.YUV420P10):
-        raise vs.Error("rife_yuv: only YUV420P10 supported "
-                        f"(got {clip.format.name})")
+    if clip.format.bits_per_sample != 10 or clip.format.sample_type != vs.INTEGER:
+        raise vs.Error("rife_yuv: input must be 10-bit integer YUV "
+                       f"(got {clip.format.name})")
+    if clip.format.subsampling_w not in (0, 1) or clip.format.subsampling_h not in (0, 1):
+        raise vs.Error("rife_yuv: only YUV420P10/YUV422P10/YUV444P10 supported "
+                       f"(got {clip.format.name})")
 
     # Don't sniff the matrix at init — mpv's vapoursynth integration
     # disallows frame requests before the filter graph is fully wired,
@@ -408,6 +435,8 @@ def rife_yuv(
     # read `_Matrix` per frame inside the ModifyFrame callbacks below.
     device = torch.device("cuda", device_index)
     fp16 = True   # we always feed fp16 RGB to the engine
+    subsampling_w = clip.format.subsampling_w
+    subsampling_h = clip.format.subsampling_h
 
     cfg = _load_engines(model, clip.height, clip.width, scale, fp16, device)
     flownet = cfg["flownet"]; encode = cfg["encode"]
@@ -527,10 +556,10 @@ def rife_yuv(
         try:
             matrix, frame_range = _frame_color(src_frame)
             with lock_io, torch.cuda.stream(stream_io):
-                yp, up, vp = _frame_yuv420p10_to_planes(src_frame, device)
-                rgb = yuv420p10_to_rgb(yp, up, vp, matrix,
-                                       color_range=frame_range,
-                                       out_dtype=torch.float16)
+                yp, up, vp = _frame_yuvp10_to_planes(src_frame, device)
+                rgb = yuvp10_to_rgb(yp, up, vp, matrix,
+                                    color_range=frame_range,
+                                    out_dtype=torch.float16)
                 if need_pad:
                     rgb = F.pad(rgb, padding)
                 stream_io.synchronize()
@@ -607,14 +636,20 @@ def rife_yuv(
             # with mid-stream matrix/range changes are extremely rare; for
             # the common case both source frames share those props.
             matrix, frame_range = color
-            yq, uq, vq = rgb_to_yuv420p10(out, matrix, color_range=frame_range)
+            yq, uq, vq = rgb_to_yuvp10(
+                out,
+                matrix,
+                color_range=frame_range,
+                subsampling_w=subsampling_w,
+                subsampling_h=subsampling_h,
+            )
             stream_inf.synchronize()
 
         # Write GPU result directly into the BlankClip dst frame (no
         # .copy() — saves a 6 MB memset per interp frame at 1080p).
         # `_MP_IMAGE` and other mpv frame props are restored by the
         # CopyFrameProps wrap below, not per-frame here.
-        return _planes_to_frame_yuv420p10(yq, uq, vq, f[2])
+        return _planes_to_frame_yuvp10(yq, uq, vq, f[2])
 
     # Build the output clip skeleton (factor_num × source FPS).
     # Wire `_encoding_pass` as a ModifyFrame on the SOURCE clip so the
@@ -661,32 +696,41 @@ def rife_yuv(
 
 
 @torch.inference_mode()
-def downsample_yuv420p10_gpu(
+def downsample_yuvp10_gpu(
     clip: vs.VideoNode,
     *,
     width: int = 1920,
     height: int = 1080,
     device_index: int = 0,
 ) -> vs.VideoNode:
-    """Downsample YUV420P10 on CUDA and return a YUV420P10 clip.
+    """Downsample YUV P10 4:2:0 / 4:2:2 / 4:4:4 on CUDA.
 
     This is intentionally small and conservative for the Windows mpv path:
-    it keeps the source/interpolated stream in VapourSynth-compatible
-    YUV420P10, while moving the expensive 4K -> 1080p plane resize onto
-    torch when the optional 4K downsample profile is enabled.
+    it keeps the source/interpolated stream in VapourSynth-compatible P10
+    YUV with the source chroma subsampling, while moving the expensive
+    4K -> 1080p plane resize onto torch when the optional 4K downsample
+    profile is enabled.
     """
     if clip.format is None or clip.format.color_family != vs.YUV:
-        raise vs.Error("downsample_yuv420p10_gpu: input must be YUV")
-    if clip.format.id != int(vs.YUV420P10):
-        raise vs.Error("downsample_yuv420p10_gpu: only YUV420P10 supported "
+        raise vs.Error("downsample_yuvp10_gpu: input must be YUV")
+    if clip.format.bits_per_sample != 10 or clip.format.sample_type != vs.INTEGER:
+        raise vs.Error("downsample_yuvp10_gpu: input must be 10-bit integer YUV "
                        f"(got {clip.format.name})")
+    if clip.format.subsampling_w not in (0, 1) or clip.format.subsampling_h not in (0, 1):
+        raise vs.Error("downsample_yuvp10_gpu: only YUV420P10/YUV422P10/YUV444P10 supported "
+                       f"(got {clip.format.name})")
+
+    subsampling_w = clip.format.subsampling_w
+    subsampling_h = clip.format.subsampling_h
+    chroma_width = width >> subsampling_w
+    chroma_height = height >> subsampling_h
 
     device = torch.device("cuda", device_index)
     dst = vs.core.std.BlankClip(
         clip,
         width=width,
         height=height,
-        format=vs.YUV420P10,
+        format=clip.format.id,
         keep=True,
     )
 
@@ -706,8 +750,8 @@ def downsample_yuv420p10_gpu(
         v = torch.from_numpy(np.asarray(f[0][2])).to(device, non_blocking=True)
 
         y2 = _resize_plane(y, height, width)
-        u2 = _resize_plane(u, height // 2, width // 2)
-        v2 = _resize_plane(v, height // 2, width // 2)
+        u2 = _resize_plane(u, chroma_height, chroma_width)
+        v2 = _resize_plane(v, chroma_height, chroma_width)
         torch.cuda.synchronize(device)
 
         torch.from_numpy(np.asarray(out[0]).view(np.int16)).copy_(y2, non_blocking=False)
@@ -716,4 +760,7 @@ def downsample_yuv420p10_gpu(
         return out
 
     return dst.std.ModifyFrame([clip, dst], _selector).std.CopyFrameProps(clip)
-#     clip.set_output()
+
+
+# Compatibility for configs generated before the helper learned 4:2:2/4:4:4.
+downsample_yuv420p10_gpu = downsample_yuvp10_gpu

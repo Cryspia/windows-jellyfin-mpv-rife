@@ -1910,6 +1910,8 @@ using System;
 using System.Runtime.InteropServices;
 
 public static class PortableDisplayMode {
+    private const int ENUM_CURRENT_SETTINGS = -1;
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
     public struct DEVMODE {
         private const int CCHDEVICENAME = 32;
@@ -1946,19 +1948,55 @@ public static class PortableDisplayMode {
     public static DEVMODE Current() {
         DEVMODE mode = new DEVMODE();
         mode.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
-        EnumDisplaySettings(null, -1, ref mode);
+        EnumDisplaySettings(null, ENUM_CURRENT_SETTINGS, ref mode);
         return mode;
+    }
+
+    public static DEVMODE MaxRefreshAtCurrentResolution() {
+        DEVMODE current = Current();
+        if (current.dmPelsWidth <= 0 || current.dmPelsHeight <= 0) {
+            return current;
+        }
+
+        DEVMODE best = current;
+        int bestRefresh = current.dmDisplayFrequency;
+        for (int i = 0; ; i++) {
+            DEVMODE mode = new DEVMODE();
+            mode.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+            if (!EnumDisplaySettings(null, i, ref mode)) {
+                break;
+            }
+            if (mode.dmPelsWidth != current.dmPelsWidth ||
+                mode.dmPelsHeight != current.dmPelsHeight) {
+                continue;
+            }
+            if (current.dmBitsPerPel > 0 &&
+                mode.dmBitsPerPel > 0 &&
+                mode.dmBitsPerPel != current.dmBitsPerPel) {
+                continue;
+            }
+            if (mode.dmDisplayFrequency > bestRefresh) {
+                best = mode;
+                bestRefresh = mode.dmDisplayFrequency;
+            }
+        }
+        return best;
     }
 }
 "@
         }
-        $mode = [PortableDisplayMode]::Current()
+        $current = [PortableDisplayMode]::Current()
+        $mode = [PortableDisplayMode]::MaxRefreshAtCurrentResolution()
         if ($mode.dmDisplayFrequency -gt 1) {
+            $source = "Windows max display mode refresh at current resolution"
+            if ($current.dmDisplayFrequency -eq $mode.dmDisplayFrequency) {
+                $source = "Windows current display mode"
+            }
             return [pscustomobject]@{
                 Refresh = [double]$mode.dmDisplayFrequency
                 Width = [int]$mode.dmPelsWidth
                 Height = [int]$mode.dmPelsHeight
-                Source = "Windows current display mode"
+                Source = $source
             }
         }
     } catch {
@@ -2030,10 +2068,10 @@ cache.mkdir(parents=True, exist_ok=True)
 
 clip = core.std.BlankClip(width=$Width, height=$Height, format=vs.YUV420P10, length=320, fpsnum=24, fpsden=1, color=[512, 512, 512])
 if ${downsamplePy}:
-    from vs_gpu_helpers import downsample_yuv420p10_gpu
+    from vs_gpu_helpers import downsample_yuvp10_gpu
     target_h = 1080
     target_w = ((clip.width * target_h) // clip.height) & ~1
-    clip = downsample_yuv420p10_gpu(clip, width=target_w, height=target_h)
+    clip = downsample_yuvp10_gpu(clip, width=target_w, height=target_h)
 
 if ${useGpuYuvPy}:
     from vs_gpu_helpers import rife_yuv
