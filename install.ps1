@@ -1717,6 +1717,47 @@ function New-RifePrecompileSample {
     return $samplePath
 }
 
+function New-RifeRenderBenchmarkSample {
+    param(
+        [int]$Width,
+        [int]$Height,
+        [int]$DurationSeconds = 8
+    )
+
+    $ffmpegExe = Join-Path $ToolsDir "ffmpeg.exe"
+    if (-not (Test-Path $ffmpegExe)) {
+        throw "ffmpeg.exe is missing. Run install first."
+    }
+
+    $sampleDir = Join-Path $CacheDir "render-benchmark"
+    Ensure-Directory $sampleDir
+    $samplePath = Join-Path $sampleDir ("rife-render-{0}x{1}-24fps-{2}s.mp4" -f $Width, $Height, $DurationSeconds)
+    if (Test-Path $samplePath) {
+        return $samplePath
+    }
+
+    Write-Step ("Generating synthetic render benchmark sample {0}x{1} 24fps" -f $Width, $Height)
+    if ($DryRun) {
+        Write-Host "DRY-RUN: generate $samplePath"
+        return $samplePath
+    }
+
+    Invoke-Logged $ffmpegExe @(
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        "-f", "lavfi",
+        "-i", ("testsrc2=size={0}x{1}:rate=24:duration={2}" -f $Width, $Height, $DurationSeconds),
+        "-an",
+        "-pix_fmt", "yuv420p",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "18",
+        $samplePath
+    )
+    return $samplePath
+}
+
 function Invoke-MpvRifePrecompile {
     param(
         [string]$SamplePath,
@@ -2161,6 +2202,225 @@ print(json.dumps({
     }
 }
 
+function Get-RenderBenchmarkVsrScale {
+    param(
+        [int]$Width,
+        [int]$Height,
+        [switch]$DownsampleTo1080,
+        [object]$RefreshInfo
+    )
+
+    $targetW = 0
+    $targetH = 0
+    $conf = Get-RuntimeConfigMap
+    if ($conf.Contains("vsr_target_w")) {
+        [int]::TryParse([string]$conf["vsr_target_w"], [ref]$targetW) | Out-Null
+    }
+    if ($conf.Contains("vsr_target_h")) {
+        [int]::TryParse([string]$conf["vsr_target_h"], [ref]$targetH) | Out-Null
+    }
+    if (($targetW -le 0 -or $targetH -le 0) -and $RefreshInfo -and $RefreshInfo.Width -and $RefreshInfo.Height) {
+        $targetW = [int]$RefreshInfo.Width
+        $targetH = [int]$RefreshInfo.Height
+    }
+    if ($targetW -le 0 -or $targetH -le 0) {
+        $displayInfo = Get-WindowsDisplayRefresh
+        if ($displayInfo -and $displayInfo.Width -and $displayInfo.Height) {
+            $targetW = [int]$displayInfo.Width
+            $targetH = [int]$displayInfo.Height
+        }
+    }
+    if ($targetW -le 0 -or $targetH -le 0) {
+        return $null
+    }
+
+    $effectiveW = $Width
+    $effectiveH = $Height
+    if ($DownsampleTo1080 -and $Height -gt 1080) {
+        $effectiveH = 1080
+        $effectiveW = [int](($Width * $effectiveH) / $Height)
+        if (($effectiveW % 2) -eq 1) { $effectiveW -= 1 }
+    }
+    if (-not (($Width -le 1920 -and $Height -le 1080) -or $DownsampleTo1080)) {
+        return $null
+    }
+
+    $scale = [Math]::Min($targetW / [double]$effectiveW, $targetH / [double]$effectiveH)
+    $scale = [Math]::Floor($scale * 10.0) / 10.0
+    if ($scale -gt 4.0) { $scale = 4.0 }
+    if ($scale -le 1.0) { return $null }
+    return $scale
+}
+
+function Invoke-RifeRenderBenchmarkCase {
+    param(
+        [int]$Width,
+        [int]$Height,
+        [int]$Factor,
+        [string]$Model = "4.26",
+        [switch]$DownsampleTo1080,
+        [object]$RefreshInfo,
+        [int]$DurationSeconds = 8,
+        [int]$TimeoutSeconds = 0
+    )
+
+    $mpvCli = Join-Path $MpvDir "mpv.com"
+    if (-not (Test-Path $mpvCli)) {
+        throw "mpv.com is missing. Run install first."
+    }
+
+    $samplePath = New-RifeRenderBenchmarkSample $Width $Height $DurationSeconds
+    $scriptPath = Join-Path $CacheDir ("render-benchmark-" + [Guid]::NewGuid().ToString("N") + ".lua")
+    $stdoutPath = Join-Path $LogsDir ("render-benchmark-" + [Guid]::NewGuid().ToString("N") + ".out.log")
+    $stderrPath = Join-Path $LogsDir ("render-benchmark-" + [Guid]::NewGuid().ToString("N") + ".err.log")
+    $statsLua = @'
+local utils = require("mp.utils")
+local msg = require("mp.msg")
+local emitted = false
+
+local function nprop(name)
+    return mp.get_property_number(name, 0) or 0
+end
+
+local function emit_stats()
+    if emitted then return end
+    emitted = true
+    local data = {
+        frame_drop_count = nprop("frame-drop-count"),
+        mistimed_frame_count = nprop("mistimed-frame-count"),
+        vo_delayed_frame_count = nprop("vo-delayed-frame-count"),
+        display_fps = nprop("display-fps"),
+        estimated_vf_fps = nprop("estimated-vf-fps"),
+        container_fps = nprop("container-fps"),
+    }
+    local line = "RENDER_BENCH_JSON:" .. utils.format_json(data)
+    msg.info(line)
+    io.stderr:write(line .. "\n")
+    io.stderr:flush()
+end
+
+mp.register_event("end-file", emit_stats)
+mp.register_event("shutdown", emit_stats)
+'@
+
+    $maxBadFrames = [Math]::Max(2, [Math]::Ceiling((24 * $Factor * $DurationSeconds) * 0.005))
+    if ($TimeoutSeconds -le 0) {
+        $TimeoutSeconds = [int][Math]::Ceiling(($DurationSeconds * 2.0) + 10.0)
+    }
+
+    if ($DryRun) {
+        Write-Host "DRY-RUN: render benchmark RIFE $Model ${Width}x$Height x$Factor down1080=$DownsampleTo1080"
+        return [pscustomobject]@{ frame_drop_count = 0; mistimed_frame_count = 0; vo_delayed_frame_count = 0; bad_frame_count = 0; max_bad_frames = $maxBadFrames; timed_out = $false; timeout_seconds = $TimeoutSeconds; passed = $true }
+    }
+
+    Ensure-Directory $LogsDir
+    Set-Content -LiteralPath $scriptPath -Value $statsLua -Encoding UTF8
+    Set-PortablePythonEnvironment
+    $renderConfigDir = Join-Path $CacheDir "render-mpv-config"
+    Ensure-Directory $renderConfigDir
+    foreach ($name in @(
+        "rife-4.26.vpy",
+        "rife-4.26-x2.vpy",
+        "rife-4.26-x3.vpy",
+        "rife-4.26-x4.vpy",
+        "rife-4.26-half-x2.vpy",
+        "rife-4.26-down1080-x2.vpy",
+        "rife-4.26-down1080-x3.vpy",
+        "rife-4.26-down1080-x4.vpy",
+        "rife_vpy_common.py",
+        "vs_gpu_helpers.py"
+    )) {
+        $src = Join-Path $MpvConfigDir $name
+        if (Test-Path $src) {
+            Copy-Item -LiteralPath $src -Destination (Join-Path $renderConfigDir $name) -Force
+        }
+    }
+
+    $vpyModel = $Model
+    if ($Model -eq "4.26-half") {
+        $vpyName = "rife-4.26-half-x2.vpy"
+    } elseif ($Model -eq "4.26-down1080") {
+        $vpyName = "rife-4.26-down1080-x$Factor.vpy"
+    } else {
+        $vpyName = "rife-$vpyModel-x$Factor.vpy"
+    }
+    $vf = "@rife:vapoursynth=file=~~/$vpyName" + ":buffered-frames=12:concurrent-frames=4"
+    $vsrScale = Get-RenderBenchmarkVsrScale $Width $Height -DownsampleTo1080:$DownsampleTo1080 -RefreshInfo $RefreshInfo
+    if ($vsrScale) {
+        $vf += ",@vsr:d3d11vpp=scale=$vsrScale" + ":scaling-mode=nvidia"
+    }
+
+    $args = @(
+        "--config-dir=$renderConfigDir",
+        "--load-scripts=yes",
+        "--script=$scriptPath",
+        "--no-audio",
+        "--keep-open=no",
+        "--length=$DurationSeconds",
+        "--vo=gpu-next",
+        "--gpu-api=d3d11",
+        "--gpu-context=d3d11",
+        "--hwdec=d3d11va",
+        "--profile=gpu-hq",
+        "--video-sync=display-resample",
+        "--interpolation=no",
+        "--tscale=oversample",
+        "--scale=ewa_lanczossharp",
+        "--cscale=ewa_lanczossharp",
+        "--dscale=mitchell",
+        "--correct-downscaling=yes",
+        "--linear-downscaling=yes",
+        "--sigmoid-upscaling=yes",
+        "--deband=yes",
+        "--target-colorspace-hint=yes",
+        "--dither-depth=auto",
+        "--msg-level=all=warn,cplayer=info,vf=info",
+        "--vf=$vf",
+        $samplePath
+    )
+
+    try {
+        $p = Start-Process -FilePath $mpvCli -ArgumentList $args -WorkingDirectory $renderConfigDir -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -WindowStyle Hidden
+        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            return [pscustomobject]@{
+                frame_drop_count = 0
+                mistimed_frame_count = 0
+                vo_delayed_frame_count = 0
+                display_fps = 0.0
+                estimated_vf_fps = 0.0
+                container_fps = 24.0
+                bad_frame_count = $maxBadFrames + 1
+                max_bad_frames = $maxBadFrames
+                timed_out = $true
+                timeout_seconds = $TimeoutSeconds
+                passed = $false
+            }
+        }
+        $output = @()
+        if (Test-Path $stdoutPath) { $output += Get-Content -LiteralPath $stdoutPath }
+        if (Test-Path $stderrPath) { $output += Get-Content -LiteralPath $stderrPath }
+        if ($p.ExitCode -ne 0) {
+            throw "render benchmark mpv failed: $output"
+        }
+        $jsonLine = $output | Where-Object { $_ -match '^RENDER_BENCH_JSON:' } | Select-Object -Last 1
+        if (-not $jsonLine) {
+            throw "render benchmark did not return stats: $output"
+        }
+        $stats = (($jsonLine -replace '^RENDER_BENCH_JSON:', '') | ConvertFrom-Json)
+        $badFrames = [int]$stats.frame_drop_count + [int]$stats.mistimed_frame_count + [int]$stats.vo_delayed_frame_count
+        $stats | Add-Member -NotePropertyName bad_frame_count -NotePropertyValue $badFrames -Force
+        $stats | Add-Member -NotePropertyName max_bad_frames -NotePropertyValue $maxBadFrames -Force
+        $stats | Add-Member -NotePropertyName timed_out -NotePropertyValue $false -Force
+        $stats | Add-Member -NotePropertyName timeout_seconds -NotePropertyValue $TimeoutSeconds -Force
+        $stats | Add-Member -NotePropertyName passed -NotePropertyValue ($badFrames -le $maxBadFrames) -Force
+        return $stats
+    } finally {
+        Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Measure-RifeRuntimeCapability {
     if (-not $BenchmarkRifeRuntime) {
         return
@@ -2197,8 +2457,15 @@ function Measure-RifeRuntimeCapability {
             $labelModel = if ($useDownsample4k) { "4.26 down1080" } else { "4.26 gpu-yuv" }
             Write-Host ("{0} {1} x{2}: group-p99={3:n2}ms, source-budget={4:n2}ms" -f $tier.Label, $labelModel, $factor, [double]$result.group_p99_ms, $sourceBudgetMs)
             if ([double]$result.group_p99_ms -le $sourceBudgetMs) {
-                $best = $factor
-                break
+                $renderModel = if ($useDownsample4k) { "4.26-down1080" } else { "4.26" }
+                $render = Invoke-RifeRenderBenchmarkCase $tier.Width $tier.Height $factor $renderModel -DownsampleTo1080:$useDownsample4k -RefreshInfo $refreshInfo
+                $timeoutNote = if ($render.timed_out) { ", timeout>{0}s" -f [int]$render.timeout_seconds } else { "" }
+                Write-Host ("{0} render {1} x{2}: bad-frames={3}/{4} (drop={5}, mistimed={6}, delayed={7}{8})" -f $tier.Label, $renderModel, $factor, [int]$render.bad_frame_count, [int]$render.max_bad_frames, [int]$render.frame_drop_count, [int]$render.mistimed_frame_count, [int]$render.vo_delayed_frame_count, $timeoutNote)
+                if ($render.passed) {
+                    $best = $factor
+                    break
+                }
+                Write-Warn ("{0} {1} x{2} passed RIFE compute but failed real render; trying lower factor." -f $tier.Label, $renderModel, $factor)
             }
         }
         if ($best -lt 2) {
@@ -2206,8 +2473,15 @@ function Measure-RifeRuntimeCapability {
                 $result = Invoke-RifeRuntimeBenchmarkCase $tier.Width $tier.Height 2 "4.26" 0.5 -UseGpuYuv -BudgetMs $sourceBudgetMs
                 Write-Host ("{0} 4.26 x2 scale=0.5 fallback: group-p99={1:n2}ms, source-budget={2:n2}ms" -f $tier.Label, [double]$result.group_p99_ms, $sourceBudgetMs)
                 if ([double]$result.group_p99_ms -le $sourceBudgetMs) {
-                    $best = 2
-                    $model = "4.26-half"
+                    $render = Invoke-RifeRenderBenchmarkCase $tier.Width $tier.Height 2 "4.26-half" -RefreshInfo $refreshInfo
+                    $timeoutNote = if ($render.timed_out) { ", timeout>{0}s" -f [int]$render.timeout_seconds } else { "" }
+                    Write-Host ("{0} render 4.26-half x2: bad-frames={1}/{2} (drop={3}, mistimed={4}, delayed={5}{6})" -f $tier.Label, [int]$render.bad_frame_count, [int]$render.max_bad_frames, [int]$render.frame_drop_count, [int]$render.mistimed_frame_count, [int]$render.vo_delayed_frame_count, $timeoutNote)
+                    if ($render.passed) {
+                        $best = 2
+                        $model = "4.26-half"
+                    } else {
+                        Write-Warn ("{0} 4.26-half x2 passed RIFE compute but failed real render." -f $tier.Label)
+                    }
                 }
             }
             if ($best -lt 2) {
