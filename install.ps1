@@ -26,6 +26,7 @@ $LogsDir = Join-Path $ConfigDir "logs"
 $MpvDir = Join-Path $PortableDir "mpv"
 $PythonDir = Join-Path $PortableDir "python"
 $ToolsDir = Join-Path $PortableDir "tools"
+$ScriptsDir = Join-Path $PortableDir "scripts"
 $MpvConfigDir = Join-Path $ConfigDir "mpv"
 $ShimConfigDir = Join-Path $ConfigDir "jellyfin-mpv-shim"
 $CacheDir = Join-Path $ConfigDir "cache"
@@ -193,6 +194,7 @@ function Initialize-Layout {
     Write-Step "Preparing project directories"
     foreach ($dir in @(
         $PortableDir, $ConfigDir, $LogsDir, $MpvConfigDir, $ShimConfigDir,
+        $ScriptsDir,
         $CacheDir, $DownloadsDir, $ToolsDir
     )) {
         Ensure-Directory $dir
@@ -1279,28 +1281,33 @@ function Update-MpvJsonIpcForWindowsPipe {
 
 function Write-LauncherScripts {
     Write-Step "Writing portable launcher scripts"
-    $startMpvBat = Join-Path $PortableDir "start-mpv.bat"
+    Ensure-Directory $ScriptsDir
+    $startMpvBat = Join-Path $ScriptsDir "start-mpv.bat"
     $startMpvVbs = Join-Path $PortableDir "start-mpv.vbs"
     $shimMpvWrapper = Join-Path $PortableDir "mpv-shim-wrapper.cmd"
-    $shimEntryPy = Join-Path $PortableDir "shim-entry.py"
+    $shimEntryPy = Join-Path $ScriptsDir "shim-entry.py"
     $startShimBat = Join-Path $PortableDir "start-shim.bat"
-    $startShimPs1 = Join-Path $PortableDir "start-shim.ps1"
+    $startShimPs1 = Join-Path $ScriptsDir "start-shim.ps1"
     $configureServerBat = Join-Path $PortableDir "configure-server.bat"
     $configureServerPs1 = Join-Path $PortableDir "configure-server.ps1"
-    $stopShimPs1 = Join-Path $PortableDir "stop-shim.ps1"
+    $stopShimPs1 = Join-Path $ScriptsDir "stop-shim.ps1"
     $stopShimBat = Join-Path $PortableDir "stop-shim.bat"
+    $registerMpvAssocPs1 = Join-Path $ScriptsDir "register-mpv-file-association.ps1"
+    $registerMpvAssocBat = Join-Path $ScriptsDir "register-mpv-file-association.bat"
+    $unregisterMpvAssocPs1 = Join-Path $ScriptsDir "unregister-mpv-file-association.ps1"
+    $unregisterMpvAssocBat = Join-Path $ScriptsDir "unregister-mpv-file-association.bat"
 
     $startMpv = @"
 @echo off
-set ROOT=%~dp0
-set MPV=%~dp0mpv\mpv.exe
-set CFG=%~dp0config\mpv
-set PY=%~dp0python
+set "ROOT=%~dp0.."
+set "MPV=%ROOT%\mpv\mpv.exe"
+set "CFG=%ROOT%\config\mpv"
+set "PY=%ROOT%\python"
 set PYTHONHOME=%PY%
 set PYTHONPATH=%PY%\Lib\site-packages
 set PYTHONIOENCODING=utf-8
 set VSSCRIPT_PATH=%PY%\Lib\site-packages\vapoursynth\vsscript.dll
-set DANMAKU_CACHE_DIR=%~dp0config\cache\danmaku
+set DANMAKU_CACHE_DIR=%ROOT%\config\cache\danmaku
 set MPV_HOME=%CFG%
 set PATH=%PY%;%PY%\Scripts;%PY%\Lib\site-packages;%PY%\Lib\site-packages\vapoursynth;%PY%\Lib\site-packages\torch\lib;%PY%\Lib\site-packages\torch_tensorrt\lib;%PY%\Lib\site-packages\tensorrt_libs;%PATH%
 start "" "%MPV%" --config-dir="%CFG%" %*
@@ -1308,7 +1315,7 @@ start "" "%MPV%" --config-dir="%CFG%" %*
 
     $startShimBatText = @"
 @echo off
-pwsh.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0start-shim.ps1"
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0scripts\start-shim.ps1"
 "@
 
     $shimEntryText = @"
@@ -1320,12 +1327,120 @@ if __name__ == "__main__":
 
     $stopShimBatText = @"
 @echo off
-pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop-shim.ps1"
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\stop-shim.ps1"
 "@
 
-    $startShim = @'
+    $registerMpvAssocPs1Text = @'
 $ErrorActionPreference = "Stop"
-$PortableDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$PortableDir = Split-Path -Parent $ScriptDir
+$StartMpvBat = Join-Path $ScriptDir "start-mpv.bat"
+$MpvExe = Join-Path $PortableDir "mpv\mpv.exe"
+$ProgId = "WindowsJellyfinMpvRife.MPV"
+$Extensions = @(
+    ".mkv", ".mp4", ".m4v", ".mov", ".avi", ".wmv", ".webm", ".flv", ".ts", ".m2ts",
+    ".mpg", ".mpeg", ".ogm", ".ogv", ".3gp", ".3g2", ".vob", ".rm", ".rmvb"
+)
+
+function Set-DefaultValue {
+    param([string]$Path, [string]$Value)
+    if (-not (Test-Path $Path)) {
+        New-Item -Path $Path -Force | Out-Null
+    }
+    Set-Item -Path $Path -Value $Value
+}
+
+if (-not (Test-Path $StartMpvBat)) { throw "Missing launcher: $StartMpvBat" }
+if (-not (Test-Path $MpvExe)) { throw "Missing mpv.exe: $MpvExe" }
+
+$classesRoot = "HKCU:\Software\Classes"
+$progRoot = Join-Path $classesRoot $ProgId
+Set-DefaultValue $progRoot "MPV Portable"
+Set-DefaultValue (Join-Path $progRoot "DefaultIcon") "`"$MpvExe`",0"
+Set-DefaultValue (Join-Path $progRoot "shell\open\command") "`"$StartMpvBat`" `"%1`""
+
+$appRoot = "HKCU:\Software\Clients\Media\MPV Portable"
+$capRoot = Join-Path $appRoot "Capabilities"
+if (-not (Test-Path $capRoot)) {
+    New-Item -Path $capRoot -Force | Out-Null
+}
+Set-ItemProperty -Path $capRoot -Name "ApplicationName" -Value "MPV Portable"
+Set-ItemProperty -Path $capRoot -Name "ApplicationDescription" -Value "Portable MPV configured by windows-jellyfin-mpv-rife"
+$fileAssocRoot = Join-Path $capRoot "FileAssociations"
+if (-not (Test-Path $fileAssocRoot)) {
+    New-Item -Path $fileAssocRoot -Force | Out-Null
+}
+
+foreach ($ext in $Extensions) {
+    $extRoot = Join-Path $classesRoot $ext
+    if (-not (Test-Path $extRoot)) {
+        New-Item -Path $extRoot -Force | Out-Null
+    }
+    $openWith = Join-Path $extRoot "OpenWithProgids"
+    if (-not (Test-Path $openWith)) {
+        New-Item -Path $openWith -Force | Out-Null
+    }
+    New-ItemProperty -Path $openWith -Name $ProgId -PropertyType String -Value "" -Force | Out-Null
+    Set-ItemProperty -Path $fileAssocRoot -Name $ext -Value $ProgId
+}
+
+$registeredApps = "HKCU:\Software\RegisteredApplications"
+if (-not (Test-Path $registeredApps)) {
+    New-Item -Path $registeredApps -Force | Out-Null
+}
+Set-ItemProperty -Path $registeredApps -Name "MPV Portable" -Value "Software\Clients\Media\MPV Portable\Capabilities"
+
+Write-Host "Registered MPV Portable for current-user Open With entries."
+Write-Host "Windows protects default-app selection; choose MPV Portable from Settings > Apps > Default apps, or right-click a video > Open with > Choose another app."
+'@
+
+    $registerMpvAssocBatText = @"
+@echo off
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0register-mpv-file-association.ps1"
+pause
+"@
+
+    $unregisterMpvAssocPs1Text = @'
+$ErrorActionPreference = "Stop"
+$ProgId = "WindowsJellyfinMpvRife.MPV"
+$Extensions = @(
+    ".mkv", ".mp4", ".m4v", ".mov", ".avi", ".wmv", ".webm", ".flv", ".ts", ".m2ts",
+    ".mpg", ".mpeg", ".ogm", ".ogv", ".3gp", ".3g2", ".vob", ".rm", ".rmvb"
+)
+
+$classesRoot = "HKCU:\Software\Classes"
+foreach ($ext in $Extensions) {
+    $openWith = Join-Path (Join-Path $classesRoot $ext) "OpenWithProgids"
+    if (Test-Path $openWith) {
+        Remove-ItemProperty -Path $openWith -Name $ProgId -ErrorAction SilentlyContinue
+    }
+}
+
+$progRoot = Join-Path $classesRoot $ProgId
+if (Test-Path $progRoot) {
+    Remove-Item -LiteralPath $progRoot -Recurse -Force
+}
+
+Remove-ItemProperty -Path "HKCU:\Software\RegisteredApplications" -Name "MPV Portable" -ErrorAction SilentlyContinue
+$appRoot = "HKCU:\Software\Clients\Media\MPV Portable"
+if (Test-Path $appRoot) {
+    Remove-Item -LiteralPath $appRoot -Recurse -Force
+}
+
+Write-Host "Unregistered MPV Portable Open With entries for the current user."
+Write-Host "If Windows still shows it in Default apps, restart Explorer or sign out and back in."
+'@
+
+    $unregisterMpvAssocBatText = @"
+@echo off
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0unregister-mpv-file-association.ps1"
+pause
+"@
+
+$startShim = @'
+$ErrorActionPreference = "Stop"
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$PortableDir = Split-Path -Parent $ScriptDir
 $PythonExe = Join-Path $PortableDir "python\python.exe"
 $MpvExe = Join-Path $PortableDir "mpv\mpv.exe"
 $ConfigDir = Join-Path $PortableDir "config"
@@ -1394,7 +1509,7 @@ try {
     $env:MPV_HOME = $MpvConfigDir
     $env:DANMAKU_CACHE_DIR = Join-Path $CacheDir "danmaku"
     $argList = @(
-        (Join-Path $PortableDir "shim-entry.py"),
+        (Join-Path $ScriptDir "shim-entry.py"),
         "--gui",
         "--config", $ShimConfigDir
     )
@@ -1416,9 +1531,10 @@ catch {
 }
 '@
 
-    $stopShim = @'
+$stopShim = @'
 $ErrorActionPreference = "Stop"
-$PortableDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$PortableDir = Split-Path -Parent $ScriptDir
 $PythonExe = Join-Path $PortableDir "python\python.exe"
 $ShimConfigDir = Join-Path $PortableDir "config\jellyfin-mpv-shim"
 $LogDir = Join-Path $PortableDir "config\logs"
@@ -1480,8 +1596,50 @@ Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
         Set-Content -Path $stopShimBat -Value $stopShimBatText -Encoding ASCII
         Set-Content -Path $startShimPs1 -Value $startShim -Encoding ASCII
         Set-Content -Path $stopShimPs1 -Value $stopShim -Encoding ASCII
-        Remove-Item -LiteralPath $startMpvVbs, $shimMpvWrapper, $configureServerBat, $configureServerPs1, (Join-Path $PortableDir "add-server.bat"), (Join-Path $PortableDir "add-server.ps1") -Force -ErrorAction SilentlyContinue
+        Set-Content -Path $registerMpvAssocPs1 -Value $registerMpvAssocPs1Text -Encoding ASCII
+        Set-Content -Path $registerMpvAssocBat -Value $registerMpvAssocBatText -Encoding ASCII
+        Set-Content -Path $unregisterMpvAssocPs1 -Value $unregisterMpvAssocPs1Text -Encoding ASCII
+        Set-Content -Path $unregisterMpvAssocBat -Value $unregisterMpvAssocBatText -Encoding ASCII
+        Remove-Item -LiteralPath `
+            (Join-Path $PortableDir "start-mpv.bat"),
+            $startMpvVbs,
+            $shimMpvWrapper,
+            (Join-Path $PortableDir "shim-entry.py"),
+            (Join-Path $PortableDir "start-shim.ps1"),
+            (Join-Path $PortableDir "stop-shim.ps1"),
+            (Join-Path $PortableDir "register-mpv-file-association.bat"),
+            (Join-Path $PortableDir "register-mpv-file-association.ps1"),
+            (Join-Path $PortableDir "unregister-mpv-file-association.bat"),
+            (Join-Path $PortableDir "unregister-mpv-file-association.ps1"),
+            $configureServerBat,
+            $configureServerPs1,
+            (Join-Path $PortableDir "add-server.bat"),
+            (Join-Path $PortableDir "add-server.ps1") -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Create-MpvShortcut {
+    Write-Step "Creating MPV Portable shortcut"
+    $lnk = Join-Path $PortableDir "MPV Portable.lnk"
+    $target = Join-Path $ScriptsDir "start-mpv.bat"
+    $icon = Join-Path $MpvDir "mpv.exe"
+    if ($DryRun) {
+        Write-Host "DRY-RUN: create shortcut $lnk -> $target"
+        return
+    }
+    if (-not (Test-Path $target)) {
+        throw "Cannot create MPV shortcut because launcher is missing: $target"
+    }
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($lnk)
+    $shortcut.TargetPath = $target
+    $shortcut.WorkingDirectory = $PortableDir
+    $shortcut.WindowStyle = 7
+    $shortcut.Description = "Start MPV Portable with this project's portable config"
+    if (Test-Path $icon) {
+        $shortcut.IconLocation = "$icon,0"
+    }
+    $shortcut.Save()
 }
 
 function Update-ShimConfig {
@@ -2644,11 +2802,12 @@ function Install-All {
     Remove-LegacyShimMpvCopies
     Cleanup-ObsoleteConfig
     Write-LauncherScripts
+    Create-MpvShortcut
     if (-not $KeepDownloads) {
         Cleanup-Downloads
     }
     Write-Step "Install complete"
-    Write-Host "Run: .\$PortableName\start-mpv.bat .\sample-video\sample-20s.mp4"
+    Write-Host "Run: .\$PortableName\MPV Portable.lnk"
     Write-Host "Run: .\$PortableName\start-shim.bat"
 }
 
@@ -2661,7 +2820,10 @@ function Show-Status {
         (Join-Path $PortableDir "python\python.exe"),
         (Join-Path $ConfigDir "mpv\mpv.conf"),
         (Join-Path $ConfigDir "jellyfin-mpv-shim\conf.json"),
-        (Join-Path $PortableDir "start-shim.ps1")
+        (Join-Path $PortableDir "start-shim.bat"),
+        (Join-Path $PortableDir "stop-shim.bat"),
+        (Join-Path $PortableDir "MPV Portable.lnk"),
+        (Join-Path $ScriptsDir "start-shim.ps1")
     )
     foreach ($item in $items) {
         if (Test-Path $item) {
@@ -2680,12 +2842,18 @@ function Uninstall-Portable {
             (Join-Path $PortableDir "mpv"),
             (Join-Path $PortableDir "python"),
             (Join-Path $PortableDir "tools"),
+            (Join-Path $PortableDir "scripts"),
             (Join-Path $PortableDir "_downloads"),
             (Join-Path $PortableDir "_mpv_extract"),
             (Join-Path $PortableDir "_ffmpeg_extract"),
             (Join-Path $PortableDir "_danmaku_extract"),
             (Join-Path $PortableDir "start-mpv.bat"),
             (Join-Path $PortableDir "start-mpv.vbs"),
+            (Join-Path $PortableDir "MPV Portable.lnk"),
+            (Join-Path $PortableDir "register-mpv-file-association.bat"),
+            (Join-Path $PortableDir "register-mpv-file-association.ps1"),
+            (Join-Path $PortableDir "unregister-mpv-file-association.bat"),
+            (Join-Path $PortableDir "unregister-mpv-file-association.ps1"),
             (Join-Path $PortableDir "mpv-shim-wrapper.cmd"),
             (Join-Path $PortableDir "shim-entry.py"),
             (Join-Path $PortableDir "start-shim.bat"),
@@ -2728,8 +2896,8 @@ switch ($Command) {
     "test-mpv" { Test-Mpv }
     "test-rife" { Test-Rife }
     "test-all" { Test-All }
-    "start-shim" { & (Join-Path $PortableDir "start-shim.ps1") }
-    "stop-shim" { & (Join-Path $PortableDir "stop-shim.ps1") }
+    "start-shim" { & (Join-Path $ScriptsDir "start-shim.ps1") }
+    "stop-shim" { & (Join-Path $ScriptsDir "stop-shim.ps1") }
     "create-startup" { Create-StartupShortcut }
     "remove-startup" { Remove-StartupShortcut }
 }
