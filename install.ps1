@@ -44,6 +44,13 @@ $TorchVersion = "2.11.0"
 $TensorRtVersion = "10.15.1.29"
 $TorchTensorRtVersion = "2.11.0"
 
+$MpvRootLauncherExe = Join-Path $PortableDir "MPV Portable.exe"
+$MpvRootLauncherBat = Join-Path $PortableDir "MPV Portable.bat"
+$StartShimRootLauncherExe = Join-Path $PortableDir "start-shim.exe"
+$StartShimRootLauncherBat = Join-Path $PortableDir "start-shim.bat"
+$StopShimRootLauncherExe = Join-Path $PortableDir "stop-shim.exe"
+$StopShimRootLauncherBat = Join-Path $PortableDir "stop-shim.bat"
+
 function Write-Step {
     param([string]$Message)
     Write-Host "[+] $Message" -ForegroundColor Cyan
@@ -1286,12 +1293,12 @@ function Write-LauncherScripts {
     $startMpvVbs = Join-Path $PortableDir "start-mpv.vbs"
     $shimMpvWrapper = Join-Path $PortableDir "mpv-shim-wrapper.cmd"
     $shimEntryPy = Join-Path $ScriptsDir "shim-entry.py"
-    $startShimBat = Join-Path $PortableDir "start-shim.bat"
+    $startShimBat = Join-Path $ScriptsDir "start-shim.bat"
     $startShimPs1 = Join-Path $ScriptsDir "start-shim.ps1"
     $configureServerBat = Join-Path $PortableDir "configure-server.bat"
     $configureServerPs1 = Join-Path $PortableDir "configure-server.ps1"
     $stopShimPs1 = Join-Path $ScriptsDir "stop-shim.ps1"
-    $stopShimBat = Join-Path $PortableDir "stop-shim.bat"
+    $stopShimBat = Join-Path $ScriptsDir "stop-shim.bat"
     $registerMpvAssocPs1 = Join-Path $ScriptsDir "register-mpv-file-association.ps1"
     $registerMpvAssocBat = Join-Path $ScriptsDir "register-mpv-file-association.bat"
     $unregisterMpvAssocPs1 = Join-Path $ScriptsDir "unregister-mpv-file-association.ps1"
@@ -1315,7 +1322,7 @@ start "" "%MPV%" --config-dir="%CFG%" %*
 
     $startShimBatText = @"
 @echo off
-pwsh.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0scripts\start-shim.ps1"
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0start-shim.ps1"
 "@
 
     $shimEntryText = @"
@@ -1327,15 +1334,15 @@ if __name__ == "__main__":
 
     $stopShimBatText = @"
 @echo off
-pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\stop-shim.ps1"
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop-shim.ps1"
 "@
 
     $registerMpvAssocPs1Text = @'
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PortableDir = Split-Path -Parent $ScriptDir
-$StartMpvBat = Join-Path $ScriptDir "start-mpv.bat"
-$MpvExe = Join-Path $PortableDir "mpv\mpv.exe"
+$StartMpvExe = Join-Path $PortableDir "MPV Portable.exe"
+$StartMpvBat = Join-Path $PortableDir "MPV Portable.bat"
 $ProgId = "WindowsJellyfinMpvRife.MPV"
 $Extensions = @(
     ".mkv", ".mp4", ".m4v", ".mov", ".avi", ".wmv", ".webm", ".flv", ".ts", ".m2ts",
@@ -1350,14 +1357,14 @@ function Set-DefaultValue {
     Set-Item -Path $Path -Value $Value
 }
 
-if (-not (Test-Path $StartMpvBat)) { throw "Missing launcher: $StartMpvBat" }
-if (-not (Test-Path $MpvExe)) { throw "Missing mpv.exe: $MpvExe" }
+$StartMpvLauncher = if (Test-Path $StartMpvExe) { $StartMpvExe } else { $StartMpvBat }
+if (-not (Test-Path $StartMpvLauncher)) { throw "Missing launcher: $StartMpvLauncher" }
 
 $classesRoot = "HKCU:\Software\Classes"
 $progRoot = Join-Path $classesRoot $ProgId
 Set-DefaultValue $progRoot "MPV Portable"
-Set-DefaultValue (Join-Path $progRoot "DefaultIcon") "`"$MpvExe`",0"
-Set-DefaultValue (Join-Path $progRoot "shell\open\command") "`"$StartMpvBat`" `"%1`""
+Set-DefaultValue (Join-Path $progRoot "DefaultIcon") "`"$StartMpvLauncher`",0"
+Set-DefaultValue (Join-Path $progRoot "shell\open\command") "`"$StartMpvLauncher`" `"%1`""
 
 $appRoot = "HKCU:\Software\Clients\Media\MPV Portable"
 $capRoot = Join-Path $appRoot "Capabilities"
@@ -1435,6 +1442,21 @@ Write-Host "If Windows still shows it in Default apps, restart Explorer or sign 
 @echo off
 pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0unregister-mpv-file-association.ps1"
 pause
+"@
+
+    $rootMpvBatText = @"
+@echo off
+call "%~dp0scripts\start-mpv.bat" %*
+"@
+
+    $rootStartShimBatText = @"
+@echo off
+call "%~dp0scripts\start-shim.bat"
+"@
+
+    $rootStopShimBatText = @"
+@echo off
+call "%~dp0scripts\stop-shim.bat"
 "@
 
 $startShim = @'
@@ -1600,6 +1622,9 @@ Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
         Set-Content -Path $registerMpvAssocBat -Value $registerMpvAssocBatText -Encoding ASCII
         Set-Content -Path $unregisterMpvAssocPs1 -Value $unregisterMpvAssocPs1Text -Encoding ASCII
         Set-Content -Path $unregisterMpvAssocBat -Value $unregisterMpvAssocBatText -Encoding ASCII
+        Set-Content -Path $MpvRootLauncherBat -Value $rootMpvBatText -Encoding ASCII
+        Set-Content -Path $StartShimRootLauncherBat -Value $rootStartShimBatText -Encoding ASCII
+        Set-Content -Path $StopShimRootLauncherBat -Value $rootStopShimBatText -Encoding ASCII
         Remove-Item -LiteralPath `
             (Join-Path $PortableDir "start-mpv.bat"),
             $startMpvVbs,
@@ -1611,6 +1636,7 @@ Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
             (Join-Path $PortableDir "register-mpv-file-association.ps1"),
             (Join-Path $PortableDir "unregister-mpv-file-association.bat"),
             (Join-Path $PortableDir "unregister-mpv-file-association.ps1"),
+            (Join-Path $PortableDir "MPV Portable.lnk"),
             $configureServerBat,
             $configureServerPs1,
             (Join-Path $PortableDir "add-server.bat"),
@@ -1618,28 +1644,168 @@ Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
     }
 }
 
-function Create-MpvShortcut {
-    Write-Step "Creating MPV Portable shortcut"
-    $lnk = Join-Path $PortableDir "MPV Portable.lnk"
-    $target = Join-Path $ScriptsDir "start-mpv.bat"
-    $icon = Join-Path $MpvDir "mpv.exe"
+function Get-CSharpCompiler {
+    $cmd = Get-Command csc.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    foreach ($path in @(
+        "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
+        "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+    )) {
+        if (Test-Path $path) { return $path }
+    }
+    return $null
+}
+
+function Export-AssociatedIcon {
+    param(
+        [string]$SourcePath,
+        [string]$IconPath
+    )
+    try {
+        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+        $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($SourcePath)
+        if (-not $icon) { return $false }
+        $stream = [System.IO.File]::Open($IconPath, [System.IO.FileMode]::Create)
+        try {
+            $icon.Save($stream)
+        } finally {
+            $stream.Dispose()
+            $icon.Dispose()
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Convert-PngToIcon {
+    param(
+        [string]$PngPath,
+        [string]$IconPath
+    )
+    try {
+        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+        $bitmap = [System.Drawing.Bitmap]::new($PngPath)
+        try {
+            $handle = $bitmap.GetHicon()
+            $icon = [System.Drawing.Icon]::FromHandle($handle)
+            try {
+                $stream = [System.IO.File]::Open($IconPath, [System.IO.FileMode]::Create)
+                try {
+                    $icon.Save($stream)
+                } finally {
+                    $stream.Dispose()
+                }
+            } finally {
+                $icon.Dispose()
+                Add-Type -Namespace NativeMethods -Name User32 -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool DestroyIcon(System.IntPtr hIcon);' -ErrorAction SilentlyContinue
+                [NativeMethods.User32]::DestroyIcon($handle) | Out-Null
+            }
+        } finally {
+            $bitmap.Dispose()
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function New-PortableLauncherExe {
+    param(
+        [string]$OutputPath,
+        [string]$RelativeTarget,
+        [string]$IconPath = $null
+    )
+    $compiler = Get-CSharpCompiler
+    if (-not $compiler) { return $false }
+
+    Ensure-Directory $CacheDir
+    $sourcePath = Join-Path $CacheDir ("launcher-" + [Guid]::NewGuid().ToString("N") + ".cs")
+    $escapedTarget = $RelativeTarget.Replace("\", "\\").Replace('"', '\"')
+    $source = @"
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Text;
+
+internal static class PortableLauncher {
+    private const string RelativeTarget = "$escapedTarget";
+
+    private static string Quote(string value) {
+        if (String.IsNullOrEmpty(value)) return "\"\"";
+        var sb = new StringBuilder();
+        sb.Append('"');
+        foreach (char c in value) {
+            if (c == '\\' || c == '"') sb.Append('\\');
+            sb.Append(c);
+        }
+        sb.Append('"');
+        return sb.ToString();
+    }
+
+    private static int Main(string[] args) {
+        string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+        string target = Path.GetFullPath(Path.Combine(baseDir, RelativeTarget));
+        if (!File.Exists(target)) return 2;
+        var psi = new ProcessStartInfo();
+        psi.FileName = target;
+        psi.WorkingDirectory = baseDir;
+        psi.UseShellExecute = true;
+        psi.WindowStyle = ProcessWindowStyle.Hidden;
+        if (args.Length > 0) {
+            var sb = new StringBuilder();
+            for (int i = 0; i < args.Length; i++) {
+                if (i > 0) sb.Append(' ');
+                sb.Append(Quote(args[i]));
+            }
+            psi.Arguments = sb.ToString();
+        }
+        Process.Start(psi);
+        return 0;
+    }
+}
+"@
+
+    try {
+        Set-Content -LiteralPath $sourcePath -Value $source -Encoding ASCII
+        $args = @("/nologo", "/target:winexe", "/optimize+", "/out:$OutputPath")
+        if ($IconPath -and (Test-Path $IconPath)) {
+            $args += "/win32icon:$IconPath"
+        }
+        $args += $sourcePath
+        $compilerOutput = & $compiler @args 2>&1
+        $ok = ((Test-Path $OutputPath) -and ($LASTEXITCODE -eq 0))
+        if (-not $ok -and $compilerOutput) {
+            Write-Warn ("Launcher compiler failed for {0}: {1}" -f (Split-Path -Leaf $OutputPath), ($compilerOutput -join " "))
+        }
+        return $ok
+    } finally {
+        Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Create-RootLaunchers {
+    Write-Step "Creating portable root launchers"
     if ($DryRun) {
-        Write-Host "DRY-RUN: create shortcut $lnk -> $target"
+        Write-Host "DRY-RUN: create root launchers"
         return
     }
-    if (-not (Test-Path $target)) {
-        throw "Cannot create MPV shortcut because launcher is missing: $target"
+
+    $mpvIcon = Join-Path $AssetsDir "icons\mpv.ico"
+    $shimIcon = Join-Path $AssetsDir "icons\jellyfin.ico"
+
+    $compiled = $true
+    $compiled = (New-PortableLauncherExe $MpvRootLauncherExe "scripts\start-mpv.bat" $mpvIcon) -and $compiled
+    $compiled = (New-PortableLauncherExe $StartShimRootLauncherExe "scripts\start-shim.bat" $shimIcon) -and $compiled
+    $compiled = (New-PortableLauncherExe $StopShimRootLauncherExe "scripts\stop-shim.bat" $shimIcon) -and $compiled
+
+    if ($compiled) {
+        Remove-Item -LiteralPath $MpvRootLauncherBat, $StartShimRootLauncherBat, $StopShimRootLauncherBat -Force -ErrorAction SilentlyContinue
+        Write-Host "Created root .exe launchers."
+    } else {
+        Remove-Item -LiteralPath $MpvRootLauncherExe, $StartShimRootLauncherExe, $StopShimRootLauncherExe -Force -ErrorAction SilentlyContinue
+        Write-Warn "C# compiler is not available or launcher build failed; using root .bat launchers instead."
     }
-    $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut($lnk)
-    $shortcut.TargetPath = $target
-    $shortcut.WorkingDirectory = $PortableDir
-    $shortcut.WindowStyle = 7
-    $shortcut.Description = "Start MPV Portable with this project's portable config"
-    if (Test-Path $icon) {
-        $shortcut.IconLocation = "$icon,0"
-    }
-    $shortcut.Save()
 }
 
 function Update-ShimConfig {
@@ -2748,7 +2914,7 @@ function Create-StartupShortcut {
     Write-Step "Creating current-user Startup shortcut for jellyfin-mpv-shim"
     $startup = [Environment]::GetFolderPath("Startup")
     $lnk = Join-Path $startup "Jellyfin MPV Shim Portable.lnk"
-    $target = Join-Path $PortableDir "start-shim.bat"
+    $target = if (Test-Path $StartShimRootLauncherExe) { $StartShimRootLauncherExe } else { $StartShimRootLauncherBat }
     if ($DryRun) {
         Write-Host "DRY-RUN: create shortcut $lnk -> $target"
         return
@@ -2759,6 +2925,9 @@ function Create-StartupShortcut {
     $shortcut.WorkingDirectory = $PortableDir
     $shortcut.WindowStyle = 7
     $shortcut.Description = "Start portable jellyfin-mpv-shim"
+    if (Test-Path $target) {
+        $shortcut.IconLocation = "$target,0"
+    }
     $shortcut.Save()
 }
 
@@ -2802,27 +2971,30 @@ function Install-All {
     Remove-LegacyShimMpvCopies
     Cleanup-ObsoleteConfig
     Write-LauncherScripts
-    Create-MpvShortcut
+    Create-RootLaunchers
     if (-not $KeepDownloads) {
         Cleanup-Downloads
     }
     Write-Step "Install complete"
-    Write-Host "Run: .\$PortableName\MPV Portable.lnk"
-    Write-Host "Run: .\$PortableName\start-shim.bat"
+    Write-Host "Run: .\$PortableName\MPV Portable.exe or .\$PortableName\MPV Portable.bat"
+    Write-Host "Run: .\$PortableName\start-shim.exe or .\$PortableName\start-shim.bat"
 }
 
 function Show-Status {
     Migrate-LegacyLayout
     Initialize-Layout
     Test-NvidiaVideoSuperResolution
+    $mpvRootItem = if (Test-Path $MpvRootLauncherExe) { $MpvRootLauncherExe } else { $MpvRootLauncherBat }
+    $startShimRootItem = if (Test-Path $StartShimRootLauncherExe) { $StartShimRootLauncherExe } else { $StartShimRootLauncherBat }
+    $stopShimRootItem = if (Test-Path $StopShimRootLauncherExe) { $StopShimRootLauncherExe } else { $StopShimRootLauncherBat }
     $items = @(
         (Join-Path $PortableDir "mpv\mpv.exe"),
         (Join-Path $PortableDir "python\python.exe"),
         (Join-Path $ConfigDir "mpv\mpv.conf"),
         (Join-Path $ConfigDir "jellyfin-mpv-shim\conf.json"),
-        (Join-Path $PortableDir "start-shim.bat"),
-        (Join-Path $PortableDir "stop-shim.bat"),
-        (Join-Path $PortableDir "MPV Portable.lnk"),
+        $mpvRootItem,
+        $startShimRootItem,
+        $stopShimRootItem,
         (Join-Path $ScriptsDir "start-shim.ps1")
     )
     foreach ($item in $items) {
@@ -2849,7 +3021,13 @@ function Uninstall-Portable {
             (Join-Path $PortableDir "_danmaku_extract"),
             (Join-Path $PortableDir "start-mpv.bat"),
             (Join-Path $PortableDir "start-mpv.vbs"),
+            $MpvRootLauncherExe,
+            $MpvRootLauncherBat,
             (Join-Path $PortableDir "MPV Portable.lnk"),
+            $StartShimRootLauncherExe,
+            $StartShimRootLauncherBat,
+            $StopShimRootLauncherExe,
+            $StopShimRootLauncherBat,
             (Join-Path $PortableDir "register-mpv-file-association.bat"),
             (Join-Path $PortableDir "register-mpv-file-association.ps1"),
             (Join-Path $PortableDir "unregister-mpv-file-association.bat"),

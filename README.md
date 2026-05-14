@@ -70,13 +70,13 @@ Generated launchers:
 
 | File | Purpose |
 |---|---|
-| `jellyfin-mpv-shim-portable/start-shim.bat` | Start the tray Jellyfin client |
-| `jellyfin-mpv-shim-portable/stop-shim.bat` | Stop shim, mpv, and portable Python child processes |
-| `jellyfin-mpv-shim-portable/MPV Portable.lnk` | mpv-icon shortcut that can be copied to Desktop or Start Menu and pinned |
+| `jellyfin-mpv-shim-portable/MPV Portable.exe` or `.bat` | Play local files with the same portable mpv config; `.exe` is generated when a compiler is available, otherwise `.bat` is used |
+| `jellyfin-mpv-shim-portable/start-shim.exe` or `.bat` | Start the tray Jellyfin client |
+| `jellyfin-mpv-shim-portable/stop-shim.exe` or `.bat` | Stop shim, mpv, and portable Python child processes |
 | `jellyfin-mpv-shim-portable/scripts/register-mpv-file-association.bat` | Register MPV Portable in the current user's video file Open With list |
 | `jellyfin-mpv-shim-portable/scripts/unregister-mpv-file-association.bat` | Remove that current-user Open With registration |
 
-The portable root keeps only double-click entry points; maintenance scripts live under `jellyfin-mpv-shim-portable/scripts/`. Windows 10/11 protects default-app selection, so the installer does not silently take over video file associations. To make this portable MPV the default player, run `scripts/register-mpv-file-association.bat`, then choose `MPV Portable` in Settings > Apps > Default apps, or right-click a video file and use Open with > Choose another app.
+The portable root keeps only double-click entry points; maintenance scripts live under `jellyfin-mpv-shim-portable/scripts/`. The installer prefers generating Start/taskbar-pinnable `.exe` launchers with the system .NET C# compiler; if the target machine has no compiler, it automatically falls back to `.bat` launchers. Windows 10/11 protects default-app selection, so the installer does not silently take over video file associations. To make this portable MPV the default player, run `scripts/register-mpv-file-association.bat`, then choose `MPV Portable` in Settings > Apps > Default apps, or right-click a video file and use Open with > Choose another app.
 
 ## Default Playback Pipeline
 

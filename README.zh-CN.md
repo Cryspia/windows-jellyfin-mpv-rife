@@ -70,13 +70,13 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 
 | 文件 | 用途 |
 |---|---|
-| `jellyfin-mpv-shim-portable/start-shim.bat` | 双击启动托盘版 Jellyfin 客户端 |
-| `jellyfin-mpv-shim-portable/stop-shim.bat` | 停止 shim、mpv 和 portable Python 子进程 |
-| `jellyfin-mpv-shim-portable/MPV Portable.lnk` | 带 mpv 图标的快捷方式，可复制到桌面或开始菜单并固定 |
+| `jellyfin-mpv-shim-portable/MPV Portable.exe` 或 `.bat` | 使用同一套 portable mpv 配置播放本地文件；有编译器时生成 `.exe`，否则回退 `.bat` |
+| `jellyfin-mpv-shim-portable/start-shim.exe` 或 `.bat` | 启动托盘版 Jellyfin 客户端 |
+| `jellyfin-mpv-shim-portable/stop-shim.exe` 或 `.bat` | 停止 shim、mpv 和 portable Python 子进程 |
 | `jellyfin-mpv-shim-portable/scripts/register-mpv-file-association.bat` | 当前用户注册 MPV Portable 到视频文件的“打开方式”列表 |
 | `jellyfin-mpv-shim-portable/scripts/unregister-mpv-file-association.bat` | 移除上述当前用户“打开方式”注册 |
 
-根目录只保留双击入口；其他维护脚本在 `jellyfin-mpv-shim-portable/scripts/`。Windows 10/11 会保护默认应用选择，安装器不会静默抢占视频文件关联。需要把本项目 MPV 设为默认播放器时，先运行 `scripts/register-mpv-file-association.bat`，再在“设置 > 应用 > 默认应用”里选择 `MPV Portable`，或右键视频文件选择“打开方式 > 选择其他应用”。
+根目录只保留双击入口；其他维护脚本在 `jellyfin-mpv-shim-portable/scripts/`。安装器会优先用系统自带的 .NET C# 编译器生成可固定到开始菜单/任务栏的 `.exe` 启动器；如果目标电脑没有编译器，则自动保留 `.bat` 启动器。Windows 10/11 会保护默认应用选择，安装器不会静默抢占视频文件关联。需要把本项目 MPV 设为默认播放器时，先运行 `scripts/register-mpv-file-association.bat`，再在“设置 > 应用 > 默认应用”里选择 `MPV Portable`，或右键视频文件选择“打开方式 > 选择其他应用”。
 
 ## 默认播放管线
 
