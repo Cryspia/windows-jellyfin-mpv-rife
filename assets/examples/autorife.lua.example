@@ -13,19 +13,25 @@ local manual_modes = {
 local manual_index = 1
 local active_factor = 0
 local active_model = nil
+local last_cache_warning = ""
+local last_cache_warning_time = 0
+local build_jobs = {}
+local apply
 
 local function current_script_dir()
     local ok, dir = pcall(mp.get_script_directory)
     if dir then return dir end
     local source = debug.getinfo(1, "S").source
     if source and source:sub(1, 1) == "@" then
-        return source:match("^(.*)[/\\][^/\\]+$")
+        return source:sub(2):match("^(.*)[/\\][^/\\]+$")
     end
     return "."
 end
 
 local script_dir = current_script_dir()
 local config_dir = utils.join_path(script_dir, "..")
+local portable_config_dir = script_dir:match("^(.*)[/\\]mpv[/\\]scripts$") or utils.join_path(config_dir, "..")
+local portable_dir = portable_config_dir:match("^(.*)[/\\]config$") or utils.join_path(portable_config_dir, "..")
 
 local function read_runtime_conf()
     local conf = {}
@@ -82,6 +88,211 @@ end
 local function bool_enabled(value)
     value = tostring(value or ""):lower()
     return value == "1" or value == "yes" or value == "true" or value == "on"
+end
+
+local function lower_or_default(value, default_value)
+    value = tostring(value or ""):lower()
+    if value == "" then
+        return default_value
+    end
+    return value
+end
+
+local function unique_numbers(values)
+    local seen = {}
+    local out = {}
+    for _, value in ipairs(values) do
+        value = math.floor(value)
+        if value > 0 and not seen[value] then
+            seen[value] = true
+            table.insert(out, value)
+        end
+    end
+    return out
+end
+
+local function ceil_to_multiple(value, multiple)
+    return math.ceil(value / multiple) * multiple
+end
+
+local function cache_dimensions_for_model(model)
+    local source_width = mp.get_property_native("width")
+    local source_height = mp.get_property_native("height")
+    if not source_width or not source_height then
+        return {}, {}
+    end
+
+    local effective_width = source_width
+    local effective_height = source_height
+    if model == "4.26-down1080" and source_height > 1080 then
+        effective_height = 1080
+        effective_width = math.floor((source_width * effective_height) / source_height)
+        if effective_width % 2 == 1 then
+            effective_width = effective_width - 1
+        end
+    end
+
+    local widths = unique_numbers({
+        effective_width,
+        ceil_to_multiple(effective_width, 16),
+        ceil_to_multiple(effective_width, 32),
+        ceil_to_multiple(effective_width, 64),
+        ceil_to_multiple(effective_width, 128),
+    })
+    local heights = unique_numbers({
+        effective_height,
+        ceil_to_multiple(effective_height, 16),
+        ceil_to_multiple(effective_height, 32),
+        ceil_to_multiple(effective_height, 64),
+        ceil_to_multiple(effective_height, 128),
+    })
+    return widths, heights
+end
+
+local function cache_dir_path()
+    return utils.join_path(utils.join_path(portable_config_dir, "cache"), "rife-trt")
+end
+
+local function fallback_model_cache_dir_path()
+    return utils.join_path(utils.join_path(utils.join_path(utils.join_path(utils.join_path(portable_dir, "python"), "Lib"), "site-packages"), "vsrife"), "models")
+end
+
+local function trt_cache_has_engine(model)
+    local widths, heights = cache_dimensions_for_model(model)
+    if #widths == 0 or #heights == 0 then
+        return false, "source dimensions are not available"
+    end
+
+    local scale_tokens = { "scale-1", "scale-1.0" }
+    if model == "4.26-half" then
+        scale_tokens = { "scale-0.5" }
+    end
+
+    local checked_any_dir = false
+    for _, cache_dir in ipairs({ cache_dir_path(), fallback_model_cache_dir_path() }) do
+        local files = utils.readdir(cache_dir, "files")
+        if files then
+            checked_any_dir = true
+            for _, width in ipairs(widths) do
+                for _, height in ipairs(heights) do
+                    local dim_token = string.format("_%dx%d_", width, height)
+                    for _, scale_token in ipairs(scale_tokens) do
+                        for _, name in ipairs(files) do
+                            if name:match("%.ts$") and
+                                name:find("flownet_v4.26.pkl", 1, true) and
+                                name:find(dim_token, 1, true) and
+                                name:find(scale_token, 1, true) then
+                                return true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if not checked_any_dir then
+        return false, "RIFE TensorRT cache directory is missing"
+    end
+
+    local scale_label = table.concat(scale_tokens, " or ")
+    return false, string.format("missing engine for %s (%s)", model, scale_label)
+end
+
+local function warn_missing_cache(reason)
+    local now = mp.get_time()
+    if reason == last_cache_warning and (now - last_cache_warning_time) < 5.0 then
+        return
+    end
+    last_cache_warning = reason
+    last_cache_warning_time = now
+    local message = "RIFE TRT cache missing: " .. reason .. ". Run install.ps1 install to precompile."
+    msg.warn(message)
+    mp.osd_message("RIFE cache missing; keeping current mode", 3.0)
+end
+
+local function profile_scale(model)
+    if model == "4.26-half" then
+        return 0.5
+    end
+    return 1.0
+end
+
+local function profile_downsamples(model)
+    return model == "4.26-down1080"
+end
+
+local function build_key(model, factor)
+    local width = mp.get_property_native("width") or 0
+    local height = mp.get_property_native("height") or 0
+    return string.format("%s-x%d-%dx%d", model or "none", factor or 0, width, height)
+end
+
+local function start_background_cache_build(model, factor, reason)
+    local width = mp.get_property_native("width")
+    local height = mp.get_property_native("height")
+    if not width or not height then
+        warn_missing_cache("source dimensions are not available")
+        return false
+    end
+
+    local key = build_key(model, factor)
+    if build_jobs[key] then
+        mp.osd_message("RIFE cache is building in background", 2.0)
+        return true
+    end
+
+    local python = utils.join_path(utils.join_path(portable_dir, "python"), "python.exe")
+    local helper = utils.join_path(config_dir, "rife_trt_build_cache.py")
+    if not utils.file_info(python) then
+        warn_missing_cache("portable python.exe is missing")
+        return false
+    end
+    if not utils.file_info(helper) then
+        warn_missing_cache("rife_trt_build_cache.py is missing")
+        return false
+    end
+
+    build_jobs[key] = true
+    msg.warn("RIFE TRT cache missing: " .. reason .. ". Building in background.")
+    mp.osd_message("Building RIFE TensorRT cache in background", 3.0)
+
+    local args = {
+        python,
+        helper,
+        "--width", tostring(width),
+        "--height", tostring(height),
+        "--model", "4.26",
+        "--factor", tostring(factor),
+        "--scale", tostring(profile_scale(model)),
+        "--config-dir", config_dir,
+        "--cache-dir", cache_dir_path(),
+    }
+    if profile_downsamples(model) then
+        table.insert(args, "--downsample-1080")
+    end
+
+    mp.command_native_async({
+        name = "subprocess",
+        playback_only = false,
+        capture_stdout = true,
+        capture_stderr = true,
+        args = args,
+    }, function(success, result, error)
+        build_jobs[key] = nil
+        local status = result and result.status
+        if success and status == 0 then
+            msg.info("RIFE TensorRT cache build finished for " .. key)
+            mp.osd_message("RIFE cache ready; enabling interpolation", 2.5)
+            active_factor = nil
+            active_model = nil
+            apply()
+        else
+            local stderr = result and result.stderr or tostring(error or "unknown error")
+            msg.error("RIFE TensorRT cache build failed for " .. key .. ": " .. stderr)
+            mp.osd_message("RIFE cache build failed; see console log", 4.0)
+        end
+    end)
+    return true
 end
 
 local function source_tier_max(conf, height)
@@ -187,17 +398,33 @@ local function choose_factor(conf)
     return factor, model, string.format("fps %.3f, refresh %.3fHz, caps manual=%d tier=%d mode=%s", fps, refresh, cap, tier_cap, mode.label)
 end
 
-local function apply()
+apply = function()
     if applying then return end
     local conf = read_runtime_conf()
     local factor, model, reason = choose_factor(conf)
 
     if factor == 0 and reason == "missing source fps/height" then
-        return
+        return false
     end
 
     if active_factor == factor and active_model == model then
-        return
+        return true
+    end
+
+    if factor > 0 and not bool_enabled(conf.allow_runtime_trt_build) then
+        local cache_ok, cache_reason = trt_cache_has_engine(model)
+        if not cache_ok then
+            local build_mode = lower_or_default(conf.trt_cache_build, "background")
+            if build_mode == "background" then
+                start_background_cache_build(model, factor, cache_reason)
+                return false
+            elseif build_mode == "inline" then
+                -- Fall through and let VapourSynth/vsrife build inside mpv.
+            else
+            warn_missing_cache(cache_reason)
+            return false
+            end
+        end
     end
 
     applying = true
@@ -230,16 +457,22 @@ local function apply()
     active_factor = factor
     active_model = model
     applying = false
+    return true
 end
 
 local function cycle_manual_cap()
+    local old_factor = active_factor
+    local old_model = active_model
     manual_index = manual_index + 1
     if manual_index > #manual_modes then
         manual_index = 1
     end
     active_factor = nil
     active_model = nil
-    apply()
+    if not apply() then
+        active_factor = old_factor
+        active_model = old_model
+    end
 end
 
 mp.add_key_binding("F9", "cycle-rife-factor", cycle_manual_cap)

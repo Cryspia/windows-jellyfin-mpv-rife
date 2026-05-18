@@ -33,7 +33,7 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 # 完整安装或更新
 .\install.ps1 install
 
-# 更快安装，但首次播放可能会等待 TensorRT 编译 engine
+# 更快安装；未缓存的 RIFE 档位会在首次使用时后台编译
 .\install.ps1 install -SkipRifeTrtPrecompile
 
 # 安装时测试本机 RIFE 能力，并把三档默认倍率写入 runtime.conf
@@ -107,11 +107,11 @@ RIFE 的普通路径优先使用 `vs_gpu_helpers.rife_yuv`，把 YUV/RGB 色彩�
 
 RIFE 默认使用经过 patch 的 TensorRT 混合精度策略。安装器会 patch 上游 `vsrife`，把 TensorRT 编译参数从 `use_explicit_typing=True` 改成 `use_explicit_typing=False` 加 `enabled_precisions={torch.float16, torch.float32}`；这样保留 FP16 吞吐，同时允许 TensorRT 在需要的位置使用 FP32 累加，避免快速运动和 RTX 50 系 / Blackwell 环境下可能出现的光流溢出花帧。
 
-安装时脚本还会用内置的全分辨率和兜底 RIFE 配置预编译常见 720p、1080p 和 4K TensorRT engine；如果启用 `-EnableDownsampled4kVsr`，也会预编译 4K 下采样 profile。这样可以避免第一次播放时长时间编译导致用户误以为卡死。4K engine 即使在高端显卡上也可能需要数分钟编译；如果想缩短安装时间并接受首次播放时编译，可使用 `-SkipRifeTrtPrecompile`。
+安装时脚本还会用内置的全分辨率和兜底 RIFE 配置预编译常见 720p、1080p 和 4K TensorRT engine；如果启用 `-EnableDownsampled4kVsr`，也会预编译 4K 下采样 profile。这样可以避免播放时触发耗时很长的 TensorRT engine 编译。4K engine 即使在高端显卡上也可能需要数分钟编译；只有在需要快速安装时才建议使用 `-SkipRifeTrtPrecompile`，并接受未缓存的 RIFE 档位会先不插帧播放，同时后台进程编译缺失 engine；编译完成后 mpv 会自动切到请求的 RIFE 模式。
 
 `config/mpv/runtime.conf` 控制运行时策略。可在其中手动设置 `display_refresh`、`vsr_target_w`、`vsr_target_h`，用于多显示器和 VRR 环境下固定刷新率和 VSR 目标尺寸。默认三档能力上限是 `max_factor_720`、`max_factor_1080`、`max_factor_4k`；默认 profile 字段是 `rife_model_720`、`rife_model_1080`、`rife_model_4k`，通常保持 `4.26`。使用 `-BenchmarkRifeRuntime` 安装时，脚本会先用 720p/1080p/4K 的 24fps 合成样片测试 4.26 的 x4/x3/x2，并按一个源帧间隔内所有插帧的合计耗时计算 group p99；group p99 不超过 24fps 源帧预算 41.67ms 时，该倍率进入真实渲染验证。真实渲染验证会启动 mpv 的 `gpu-next`/D3D11 输出并串上 RIFE 与 NVIDIA VSR，按 dropped/mistimed/delayed frame 计数决定是否降档；如果实际渲染墙钟时间超过测试片长度的 2 倍加启动余量，安装器会直接杀掉该 mpv 进程并把该倍率判为失败。如果某档连 4.26 x2 都无法通过，会额外测试 `4.26-half`，也就是 RIFE 4.26 x2 + `scale=0.5` 光流，通过时将该档默认写为 `4.26-half` x2。benchmark 会优先使用 `runtime.conf` 中的 `display_refresh`；为空时会枚举 Windows 当前分辨率下的最高显示模式刷新率，再失败才回退到当前模式或 60Hz。运行时 mpv 仍无法可靠读取完整 VRR range，VRR 用户建议在 `runtime.conf` 明确写入面板上限，例如 `display_refresh=160`。
 
-RIFE 的 VapourSynth 队列默认使用 `rife_buffered_frames=12` 和 `rife_concurrent_frames=4`，用于减少 TensorRT 插帧的帧时间尖峰。显存紧张或想降低延迟时可以手动调低。
+RIFE 的 VapourSynth 队列默认使用 `rife_buffered_frames=12` 和 `rife_concurrent_frames=4`，用于减少 TensorRT 插帧的帧时间尖峰。显存紧张或想降低延迟时可以手动调低。缺失的运行时 TensorRT engine 默认使用 `trt_cache_build=background`：autorife 会保持视频继续播放但暂不插帧，启动独立 portable Python 进程编译 cache，完成后自动重试当前 RIFE 档位。可改成 `trt_cache_build=skip` 禁止运行时编译；`trt_cache_build=inline` 只建议调试旧的滤镜内编译路径时使用。
 
 ## 按键
 

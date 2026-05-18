@@ -9,7 +9,7 @@ local function current_script_dir()
     if dir then return dir end
     local source = debug.getinfo(1, "S").source
     if source and source:sub(1, 1) == "@" then
-        return source:match("^(.*)[/\\][^/\\]+$")
+        return source:sub(2):match("^(.*)[/\\][^/\\]+$")
     end
     return "."
 end

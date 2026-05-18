@@ -1,0 +1,55 @@
+import argparse
+import os
+from pathlib import Path
+import sys
+
+import vapoursynth as vs
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Build a RIFE TensorRT engine cache for one runtime profile.")
+    parser.add_argument("--width", type=int, required=True)
+    parser.add_argument("--height", type=int, required=True)
+    parser.add_argument("--model", default="4.26")
+    parser.add_argument("--factor", type=int, default=2)
+    parser.add_argument("--scale", type=float, default=1.0)
+    parser.add_argument("--downsample-1080", action="store_true")
+    parser.add_argument("--config-dir", required=True)
+    parser.add_argument("--cache-dir", required=True)
+    args = parser.parse_args()
+
+    config_dir = Path(args.config_dir)
+    cache_dir = Path(args.cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["RIFE_TRT_CACHE_DIR"] = str(cache_dir)
+
+    sys.path.insert(0, str(config_dir))
+    from rife_vpy_common import run_rife_profile
+
+    core = vs.core
+    clip = core.std.BlankClip(
+        width=args.width,
+        height=args.height,
+        format=vs.YUV420P10,
+        length=max(args.factor * 4 + 8, 24),
+        fpsnum=24,
+        fpsden=1,
+        color=[512, 512, 512],
+    )
+    clip = run_rife_profile(
+        clip,
+        model=args.model,
+        scale=args.scale,
+        factor_num=args.factor,
+        factor_den=1,
+        downsample_1080=args.downsample_1080,
+    )
+
+    # Pull enough frames to force TensorRT engine build and run one warmed group.
+    for frame_no in range(min(clip.num_frames, max(args.factor * 3, 8))):
+        clip.get_frame(frame_no)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

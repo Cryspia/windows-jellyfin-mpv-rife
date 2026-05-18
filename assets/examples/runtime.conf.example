@@ -32,3 +32,13 @@ rife_model_4k=4.26
 # use more VRAM and add latency.
 rife_buffered_frames=12
 rife_concurrent_frames=4
+
+# Background is the normal runtime fallback for unusual resolutions: playback
+# continues without RIFE while a separate Python process builds the missing
+# TensorRT engine, then autorife switches to RIFE when the cache is ready.
+# Values: background, skip, inline. Inline may freeze or terminate mpv.
+trt_cache_build=background
+
+# Legacy/debug override. Keep disabled for normal playback; use
+# trt_cache_build=inline instead when intentionally testing in-filter builds.
+allow_runtime_trt_build=no

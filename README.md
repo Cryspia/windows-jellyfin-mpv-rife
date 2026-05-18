@@ -33,7 +33,7 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 # Full install or update
 .\install.ps1 install
 
-# Faster install, but first playback may pause while TensorRT builds engines
+# Faster install; uncached RIFE profiles will build in the background on first use
 .\install.ps1 install -SkipRifeTrtPrecompile
 
 # Benchmark local RIFE capability and write tier defaults to runtime.conf
@@ -107,11 +107,11 @@ This can make 4K 24fps x4 viable on the tested RTX 4080, but real frames also pa
 
 RIFE uses TensorRT with a patched mixed-precision policy by default. The installer patches upstream `vsrife` so TensorRT uses `use_explicit_typing=False` plus `enabled_precisions={torch.float16, torch.float32}` instead of `use_explicit_typing=True`; this keeps FP16 throughput while allowing FP32 accumulation where TensorRT needs it, avoiding optical-flow overflow artifacts seen on fast motion and RTX 50-series / Blackwell systems.
 
-During installation, the script also precompiles common RIFE TensorRT engines for 720p, 1080p, and 4K with the bundled full-resolution and fallback profiles. If `-EnableDownsampled4kVsr` is set, it also precompiles the downsampled 4K profiles. This avoids the long first-playback TensorRT build pause. 4K engine builds can take several minutes even on high-end GPUs; use `-SkipRifeTrtPrecompile` when you need a faster install and accept the first-playback compile delay.
+During installation, the script also precompiles common RIFE TensorRT engines for 720p, 1080p, and 4K with the bundled full-resolution and fallback profiles. If `-EnableDownsampled4kVsr` is set, it also precompiles the downsampled 4K profiles. This avoids long TensorRT engine builds during playback. 4K engine builds can take several minutes even on high-end GPUs; use `-SkipRifeTrtPrecompile` only when you need a faster install and accept that uncached RIFE profiles will first play without interpolation while a background process builds the missing engine. Once the build finishes, mpv switches to the requested RIFE mode automatically.
 
 `config/mpv/runtime.conf` controls runtime policy. Set `display_refresh`, `vsr_target_w`, and `vsr_target_h` there to pin refresh rate and VSR target size on multi-monitor and VRR systems. The default local capability caps are `max_factor_720`, `max_factor_1080`, and `max_factor_4k`; the default profile fields are `rife_model_720`, `rife_model_1080`, and `rife_model_4k`, normally kept at `4.26`. With `-BenchmarkRifeRuntime`, the installer first tests 720p/1080p/4K 24fps synthetic clips with 4.26 at x4/x3/x2, measuring group p99 as the total time needed for all inserted frames within one source-frame interval. A factor enters real-render validation when group p99 fits inside the 24fps source-frame budget of 41.67ms. Real-render validation starts mpv with `gpu-next`/D3D11 output and the RIFE plus NVIDIA VSR filter chain, then rejects factors with excessive dropped/mistimed/delayed frames; if wall-clock render time exceeds 2x the test clip duration plus startup grace, the installer kills that mpv process and treats the factor as failed. If a tier cannot pass even 4.26 x2, the installer additionally tests `4.26-half`, meaning RIFE 4.26 x2 with `scale=0.5` optical flow; when that passes, it writes that tier as `4.26-half` x2. Benchmarking uses `runtime.conf` `display_refresh` first; when empty, it enumerates the highest Windows display mode refresh at the current resolution, then falls back to the current mode or 60Hz. At runtime, mpv still cannot reliably read the full VRR range, so VRR users should set the panel ceiling explicitly, for example `display_refresh=160`.
 
-The RIFE VapourSynth queue defaults to `rife_buffered_frames=12` and `rife_concurrent_frames=4` to smooth TensorRT frame-time spikes. Lower them manually if VRAM is tight or latency matters more.
+The RIFE VapourSynth queue defaults to `rife_buffered_frames=12` and `rife_concurrent_frames=4` to smooth TensorRT frame-time spikes. Lower them manually if VRAM is tight or latency matters more. Missing runtime TensorRT engines use `trt_cache_build=background` by default: autorife keeps playback running without RIFE, starts a separate portable Python process to compile the cache, then retries the selected mode. Use `trt_cache_build=skip` to disable runtime builds or `trt_cache_build=inline` only for debugging the old in-filter build path.
 
 ## Keybindings
 

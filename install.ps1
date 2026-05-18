@@ -244,6 +244,7 @@ function Initialize-Config {
     }
     Copy-Item -LiteralPath (Join-Path $ExamplesDir "rife_vpy_common.py.example") -Destination (Join-Path $MpvConfigDir "rife_vpy_common.py") -Force
     Copy-Item -LiteralPath (Join-Path $ExamplesDir "vs_gpu_helpers.py.example") -Destination (Join-Path $MpvConfigDir "vs_gpu_helpers.py") -Force
+    Copy-Item -LiteralPath (Join-Path $ExamplesDir "rife_trt_build_cache.py.example") -Destination (Join-Path $MpvConfigDir "rife_trt_build_cache.py") -Force
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "shim-conf.json.example") (Join-Path $ShimConfigDir "conf.json")
     Ensure-Directory (Join-Path $MpvConfigDir "scripts")
     Copy-Item -LiteralPath (Join-Path $ExamplesDir "autorife.lua.example") -Destination (Join-Path $MpvConfigDir "scripts\autorife.lua") -Force
@@ -258,6 +259,8 @@ function Initialize-Config {
         rife_buffered_frames = "12"
         rife_concurrent_frames = "4"
         enable_4k_downsample_vsr = "no"
+        allow_runtime_trt_build = "no"
+        trt_cache_build = "background"
     }
     if ($EnableDownsampled4kVsr) {
         Set-RuntimeConfigValues @{
@@ -1890,6 +1893,16 @@ function Cleanup-Downloads {
 }
 
 function Cleanup-ObsoleteConfig {
+    $legacyRootCache = Join-Path $PortableDir "cache"
+    if (Test-Path $legacyRootCache) {
+        Write-Step "Removing obsolete portable root cache"
+        if ($DryRun) {
+            Write-Host "DRY-RUN: remove $legacyRootCache"
+        } else {
+            Remove-Item -LiteralPath $legacyRootCache -Recurse -Force
+        }
+    }
+
     $danmakuDir = Join-Path $ConfigDir "danmaku"
     if (Test-Path $danmakuDir) {
         Write-Step "Removing obsolete config/danmaku"

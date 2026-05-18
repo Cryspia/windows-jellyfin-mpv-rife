@@ -278,7 +278,9 @@ def _vsrife_engine_paths(model: str, ph: int, pw: int, scale: float,
     """Reproduce vsrife's cached-engine filename. Returns (flownet, encode_or_none)."""
     import vsrife
     import tensorrt
-    model_dir = Path(vsrife.__file__).parent / "models"
+    cache_override = os.environ.get("RIFE_TRT_CACHE_DIR")
+    model_dir = Path(cache_override) if cache_override else Path(vsrife.__file__).parent / "models"
+    model_dir.mkdir(parents=True, exist_ok=True)
     gpu_name = torch.cuda.get_device_name(device)
     base = (f"flownet_v{model}.pkl_{pw}x{ph}"
             f"_{'fp16' if fp16 else 'fp32'}_scale-{scale}"
@@ -306,6 +308,9 @@ def _ensure_engines(model: str, h: int, w: int, scale: float,
 
     flow_path, enc_path = _vsrife_engine_paths(model, ph, pw, scale, fp16, device)
     if not flow_path.exists():
+        cache_override = os.environ.get("RIFE_TRT_CACHE_DIR")
+        model_dir = Path(cache_override) if cache_override else flow_path.parent
+        model_dir.mkdir(parents=True, exist_ok=True)
         # Trigger build via vsrife on a dummy 1-frame clip at the right
         # native resolution. vsrife's static-shape mode bakes the engine
         # to (pw, ph) and writes it to its cache dir.
@@ -315,7 +320,8 @@ def _ensure_engines(model: str, h: int, w: int, scale: float,
                                        length=2, fpsnum=30, fpsden=1)
         clip = _rife(dummy, model=model, scale=scale,
                      factor_num=2, factor_den=1,
-                     auto_download=True, trt=True)
+                     auto_download=True, trt=True,
+                     trt_cache_dir=str(model_dir))
         clip.get_frame(0)
         flow_path, enc_path = _vsrife_engine_paths(
             model, ph, pw, scale, fp16, device,
