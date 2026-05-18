@@ -16,6 +16,7 @@ local active_model = nil
 local last_cache_warning = ""
 local last_cache_warning_time = 0
 local build_jobs = {}
+local validated_cache = {}
 local apply
 
 local function current_script_dir()
@@ -90,6 +91,16 @@ local function bool_enabled(value)
     return value == "1" or value == "yes" or value == "true" or value == "on"
 end
 
+local function has_named_filter(name)
+    local vf = mp.get_property("vf") or ""
+    return vf:find("@" .. name, 1, true) ~= nil
+end
+
+local function has_downsampled_rife_filter()
+    local vf = mp.get_property("vf") or ""
+    return vf:find("@rife", 1, true) ~= nil and vf:find("down1080", 1, true) ~= nil
+end
+
 local function lower_or_default(value, default_value)
     value = tostring(value or ""):lower()
     if value == "" then
@@ -149,12 +160,37 @@ local function cache_dimensions_for_model(model)
     return widths, heights
 end
 
+local function effective_dimensions_for_model(model)
+    local source_width = mp.get_property_native("width")
+    local source_height = mp.get_property_native("height")
+    if not source_width or not source_height then
+        return nil, nil
+    end
+    if model == "4.26-down1080" and source_height > 1080 then
+        local effective_height = 1080
+        local effective_width = math.floor((source_width * effective_height) / source_height)
+        if effective_width % 2 == 1 then
+            effective_width = effective_width - 1
+        end
+        return effective_width, effective_height
+    end
+    return source_width, source_height
+end
+
 local function cache_dir_path()
     return utils.join_path(utils.join_path(portable_config_dir, "cache"), "rife-trt")
 end
 
+local function validated_cache_dir_path()
+    return utils.join_path(cache_dir_path(), ".validated")
+end
+
 local function fallback_model_cache_dir_path()
     return utils.join_path(utils.join_path(utils.join_path(utils.join_path(utils.join_path(portable_dir, "python"), "Lib"), "site-packages"), "vsrife"), "models")
+end
+
+local function model_requires_encode(model)
+    return model == "4.26" or model == "4.26-half" or model == "4.26-down1080"
 end
 
 local function trt_cache_has_engine(model)
@@ -169,10 +205,16 @@ local function trt_cache_has_engine(model)
     end
 
     local checked_any_dir = false
+    local found_incomplete = false
+    local requires_encode = model_requires_encode(model)
     for _, cache_dir in ipairs({ cache_dir_path(), fallback_model_cache_dir_path() }) do
         local files = utils.readdir(cache_dir, "files")
         if files then
             checked_any_dir = true
+            local file_map = {}
+            for _, name in ipairs(files) do
+                file_map[name] = true
+            end
             for _, width in ipairs(widths) do
                 for _, height in ipairs(heights) do
                     local dim_token = string.format("_%dx%d_", width, height)
@@ -182,7 +224,10 @@ local function trt_cache_has_engine(model)
                                 name:find("flownet_v4.26.pkl", 1, true) and
                                 name:find(dim_token, 1, true) and
                                 name:find(scale_token, 1, true) then
-                                return true
+                                if (not requires_encode) or file_map[name .. ".encode"] then
+                                    return true
+                                end
+                                found_incomplete = true
                             end
                         end
                     end
@@ -195,6 +240,9 @@ local function trt_cache_has_engine(model)
     end
 
     local scale_label = table.concat(scale_tokens, " or ")
+    if found_incomplete then
+        return false, string.format("missing encode engine for %s (%s)", model, scale_label)
+    end
     return false, string.format("missing engine for %s (%s)", model, scale_label)
 end
 
@@ -217,14 +265,69 @@ local function profile_scale(model)
     return 1.0
 end
 
+local function profile_scale_label(model)
+    if model == "4.26-half" then
+        return "0.5"
+    end
+    return "1"
+end
+
 local function profile_downsamples(model)
     return model == "4.26-down1080"
 end
 
-local function build_key(model, factor)
-    local width = mp.get_property_native("width") or 0
-    local height = mp.get_property_native("height") or 0
-    return string.format("%s-x%d-%dx%d", model or "none", factor or 0, width, height)
+local function cache_profile_key(model)
+    local width, height = effective_dimensions_for_model(model)
+    return string.format("%s-scale-%s-%dx%d", model or "none", profile_scale_label(model), width or 0, height or 0)
+end
+
+local function sanitize_filename(value)
+    return tostring(value):gsub("[^%w%._%-]", "_")
+end
+
+local function validation_marker_path(model)
+    return utils.join_path(validated_cache_dir_path(), sanitize_filename(cache_profile_key(model)) .. ".ok")
+end
+
+local function cache_build_log_path(model)
+    return utils.join_path(cache_dir_path(), sanitize_filename(cache_profile_key(model)) .. ".build.log")
+end
+
+local function cache_build_err_path(model)
+    return utils.join_path(cache_dir_path(), sanitize_filename(cache_profile_key(model)) .. ".build.err.log")
+end
+
+local function cache_profile_validated(model)
+    if validated_cache[cache_profile_key(model)] then
+        return true
+    end
+    return utils.file_info(validation_marker_path(model)) ~= nil
+end
+
+local function mark_cache_profile_validated(model)
+    local key = cache_profile_key(model)
+    validated_cache[key] = true
+    utils.subprocess({ args = { "cmd.exe", "/d", "/c", "mkdir", validated_cache_dir_path() }, cancellable = false })
+    local f = io.open(validation_marker_path(model), "w")
+    if f then
+        f:write(os.date("!%Y-%m-%dT%H:%M:%SZ"), "\n")
+        f:close()
+    end
+end
+
+local function stop_rife_before_cache_build(model)
+    if not has_named_filter("rife") then
+        return
+    end
+    local remove_vsr = has_downsampled_rife_filter()
+    pcall(mp.commandv, "vf", "remove", "@rife")
+    if remove_vsr then
+        pcall(mp.commandv, "vf", "remove", "@vsr")
+    end
+    active_factor = 0
+    active_model = nil
+    msg.warn("RIFE disabled while preparing TensorRT cache for " .. tostring(model))
+    mp.osd_message("RIFE paused while cache builds", 2.0)
 end
 
 local function start_background_cache_build(model, factor, reason)
@@ -235,13 +338,17 @@ local function start_background_cache_build(model, factor, reason)
         return false
     end
 
-    local key = build_key(model, factor)
+    local key = cache_profile_key(model)
     if build_jobs[key] then
         mp.osd_message("RIFE cache is building in background", 2.0)
         return true
     end
 
-    local python = utils.join_path(utils.join_path(portable_dir, "python"), "python.exe")
+    local python_dir = utils.join_path(portable_dir, "python")
+    local python = utils.join_path(python_dir, "pythonw.exe")
+    if not utils.file_info(python) then
+        python = utils.join_path(python_dir, "python.exe")
+    end
     local helper = utils.join_path(config_dir, "rife_trt_build_cache.py")
     if not utils.file_info(python) then
         warn_missing_cache("portable python.exe is missing")
@@ -253,8 +360,9 @@ local function start_background_cache_build(model, factor, reason)
     end
 
     build_jobs[key] = true
-    msg.warn("RIFE TRT cache missing: " .. reason .. ". Building in background.")
-    mp.osd_message("Building RIFE TensorRT cache in background", 3.0)
+    stop_rife_before_cache_build(model)
+    msg.warn("RIFE TRT cache is not ready: " .. reason .. ". Building/validating in background.")
+    mp.osd_message("Preparing RIFE TensorRT cache in background", 3.0)
 
     local args = {
         python,
@@ -274,22 +382,20 @@ local function start_background_cache_build(model, factor, reason)
     mp.command_native_async({
         name = "subprocess",
         playback_only = false,
-        capture_stdout = true,
-        capture_stderr = true,
+        detach = true,
+        capture_stdout = false,
+        capture_stderr = false,
         args = args,
     }, function(success, result, error)
-        build_jobs[key] = nil
         local status = result and result.status
         if success and status == 0 then
-            msg.info("RIFE TensorRT cache build finished for " .. key)
-            mp.osd_message("RIFE cache ready; enabling interpolation", 2.5)
-            active_factor = nil
-            active_model = nil
-            apply()
+            msg.info("RIFE TensorRT cache build launched for " .. key)
+            mp.osd_message("RIFE cache is building; press F9 again later", 3.0)
         else
             local stderr = result and result.stderr or tostring(error or "unknown error")
-            msg.error("RIFE TensorRT cache build failed for " .. key .. ": " .. stderr)
-            mp.osd_message("RIFE cache build failed; see console log", 4.0)
+            build_jobs[key] = nil
+            msg.error("RIFE TensorRT cache build launcher failed for " .. key .. ": " .. stderr)
+            mp.osd_message("RIFE cache build launcher failed; see console log", 4.0)
         end
     end)
     return true
@@ -386,10 +492,12 @@ local function choose_factor(conf)
             model = "4.26-down1080"
             cap = 4
             factor = math.min(4, cap, tier_cap, refresh_cap)
-        else
+        elseif height > 1080 then
             model = "4.26-half"
             cap = 2
             factor = math.min(2, tier_cap, refresh_cap)
+        else
+            return 0, nil, "4K fallback profile is skipped for <=1080p sources"
         end
     end
     if factor < 2 then
@@ -407,7 +515,10 @@ apply = function()
         return false
     end
 
-    if active_factor == factor and active_model == model then
+    if factor == 0 and has_named_filter("rife") then
+        -- Keep going so stale filters are removed even if our internal
+        -- active_* state got out of sync after a background cache job.
+    elseif active_factor == factor and active_model == model then
         return true
     end
 
@@ -424,14 +535,21 @@ apply = function()
             warn_missing_cache(cache_reason)
             return false
             end
+        elseif not cache_profile_validated(model) then
+            local build_mode = lower_or_default(conf.trt_cache_build, "background")
+            if build_mode == "background" then
+                start_background_cache_build(model, factor, "validating existing engine outside mpv")
+                return false
+            end
         end
     end
 
     applying = true
-    if active_factor and active_factor > 0 then
+    local remove_vsr = factor > 0 or has_downsampled_rife_filter()
+    if remove_vsr then
         pcall(mp.commandv, "vf", "remove", "@vsr")
-        pcall(mp.commandv, "vf", "remove", "@rife")
     end
+    pcall(mp.commandv, "vf", "remove", "@rife")
 
     if factor > 0 then
         local script_name = string.format("rife-%s-x%d.vpy", model, factor)
@@ -463,15 +581,27 @@ end
 local function cycle_manual_cap()
     local old_factor = active_factor
     local old_model = active_model
-    manual_index = manual_index + 1
-    if manual_index > #manual_modes then
-        manual_index = 1
+    local old_index = manual_index
+    local conf = read_runtime_conf()
+
+    for _ = 1, #manual_modes do
+        manual_index = manual_index + 1
+        if manual_index > #manual_modes then
+            manual_index = 1
+        end
+
+        local factor, model = choose_factor(conf)
+        if factor ~= old_factor or model ~= old_model then
+            break
+        end
     end
+
     active_factor = nil
     active_model = nil
     if not apply() then
         active_factor = old_factor
         active_model = old_model
+        manual_index = old_index
     end
 end
 

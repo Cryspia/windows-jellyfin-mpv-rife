@@ -1,9 +1,83 @@
 import argparse
+import ctypes
 import os
 from pathlib import Path
 import sys
+import time
 
-import vapoursynth as vs
+
+def _configure_background_limits() -> None:
+    for key in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "TORCH_NUM_THREADS",
+    ):
+        os.environ.setdefault(key, "1")
+    os.environ.setdefault("CUDA_MODULE_LOADING", "LAZY")
+
+    if os.name == "nt":
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            kernel32.SetPriorityClass.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+            kernel32.SetPriorityClass.restype = ctypes.c_int
+            handle = kernel32.GetCurrentProcess()
+            if not kernel32.SetPriorityClass(handle, 0x00000040):  # IDLE_PRIORITY_CLASS
+                kernel32.SetPriorityClass(handle, 0x00004000)  # BELOW_NORMAL_PRIORITY_CLASS
+        except Exception:
+            pass
+
+
+def _profile_label(model: str, scale: float, downsample_1080: bool) -> str:
+    if downsample_1080:
+        return "4.26-down1080"
+    if model == "4.26" and abs(scale - 0.5) < 1e-6:
+        return "4.26-half"
+    return model
+
+
+def _scale_label(scale: float) -> str:
+    if abs(scale - 1.0) < 1e-6:
+        return "1"
+    if abs(scale - 0.5) < 1e-6:
+        return "0.5"
+    return ("%g" % scale)
+
+
+def _effective_dimensions(width: int, height: int, downsample_1080: bool) -> tuple[int, int]:
+    if downsample_1080 and height > 1080:
+        effective_height = 1080
+        effective_width = (width * effective_height) // height
+        if effective_width % 2:
+            effective_width -= 1
+        return effective_width, effective_height
+    return width, height
+
+
+def _write_validation_marker(cache_dir: Path, model: str, scale: float, width: int, height: int, downsample_1080: bool) -> None:
+    profile = _profile_label(model, scale, downsample_1080)
+    effective_width, effective_height = _effective_dimensions(width, height, downsample_1080)
+    key = f"{profile}-scale-{_scale_label(scale)}-{effective_width}x{effective_height}"
+    safe_key = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in key)
+    marker_dir = cache_dir / ".validated"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    (marker_dir / f"{safe_key}.ok").write_text("ok\n", encoding="utf-8")
+
+
+def _redirect_output(cache_dir: Path, model: str, scale: float, width: int, height: int, downsample_1080: bool) -> None:
+    profile = _profile_label(model, scale, downsample_1080)
+    effective_width, effective_height = _effective_dimensions(width, height, downsample_1080)
+    key = f"{profile}-scale-{_scale_label(scale)}-{effective_width}x{effective_height}"
+    safe_key = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in key)
+    stdout_path = cache_dir / f"{safe_key}.build.log"
+    stderr_path = cache_dir / f"{safe_key}.build.err.log"
+    stdout_file = stdout_path.open("a", encoding="utf-8")
+    stderr_file = stderr_path.open("a", encoding="utf-8")
+    sys.stdout = stdout_file
+    sys.stderr = stderr_file
 
 
 def main() -> int:
@@ -21,9 +95,14 @@ def main() -> int:
     config_dir = Path(args.config_dir)
     cache_dir = Path(args.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
+    _configure_background_limits()
+    _redirect_output(cache_dir, args.model, args.scale, args.width, args.height, args.downsample_1080)
     os.environ["RIFE_TRT_CACHE_DIR"] = str(cache_dir)
+    os.environ["RIFE_ALLOW_INLINE_TRT_BUILD"] = "1"
 
     sys.path.insert(0, str(config_dir))
+    import vapoursynth as vs
+
     from rife_vpy_common import run_rife_profile
 
     core = vs.core
@@ -48,6 +127,8 @@ def main() -> int:
     # Pull enough frames to force TensorRT engine build and run one warmed group.
     for frame_no in range(min(clip.num_frames, max(args.factor * 3, 8))):
         clip.get_frame(frame_no)
+        time.sleep(0.02)
+    _write_validation_marker(cache_dir, args.model, args.scale, args.width, args.height, args.downsample_1080)
     return 0
 
 

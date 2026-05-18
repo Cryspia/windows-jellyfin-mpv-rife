@@ -13,7 +13,7 @@ vsr_target_h=
 # Optional 4K path: downsample >1080p sources to 1080p, run RIFE there,
 # then let NVIDIA VSR upscale the stream back to the display size.
 # Default is no, which keeps original 4K real frames and uses 4.26-half as
-# the final manual/benchmark fallback.
+# the final 4K manual/benchmark fallback after background cache validation.
 enable_4k_downsample_vsr=no
 
 # Maximum RIFE factor allowed by local GPU capability per source-height tier.
@@ -23,7 +23,7 @@ max_factor_1080=4
 max_factor_4k=4
 
 # RIFE profile per source-height tier. Defaults stay on 4.26 for quality.
-# Benchmark fallback may set a tier to 4.26-half when 4.26 x2 is too slow.
+# Benchmark fallback may set the 4K tier to 4.26-half when 4.26 x2 is too slow.
 rife_model_720=4.26
 rife_model_1080=4.26
 rife_model_4k=4.26
@@ -33,10 +33,17 @@ rife_model_4k=4.26
 rife_buffered_frames=12
 rife_concurrent_frames=4
 
-# Background is the normal runtime fallback for unusual resolutions: playback
-# continues without RIFE while a separate Python process builds the missing
-# TensorRT engine, then autorife switches to RIFE when the cache is ready.
-# Values: background, skip, inline. Inline may freeze or terminate mpv.
+# RIFE output chroma layout. "source" preserves YUV420P10/YUV422P10/YUV444P10
+# source subsampling after RGB RIFE; use 444/422/420 only for explicit testing.
+# NVIDIA d3d11vpp VSR is tested to accept the YUV paths here, but RGB/BGRA
+# output is not used because mpv's D3D11 path is unstable with it.
+rife_output_subsampling=source
+
+# Runtime behavior when a matching TensorRT engine is missing.
+# Default is background: mpv keeps playing without RIFE while a separate
+# low-priority portable Python process prepares the missing cache.
+# Inline in-filter builds remain unsafe during playback.
+# Values: skip, background, inline. Inline may freeze or terminate mpv.
 trt_cache_build=background
 
 # Legacy/debug override. Keep disabled for normal playback; use

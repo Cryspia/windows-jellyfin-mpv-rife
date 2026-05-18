@@ -5,6 +5,14 @@ import sys
 import vapoursynth as vs
 
 core = vs.core
+_MISSING_TRT_CACHE = "RIFE_MISSING_TRT_CACHE"
+
+_P10_FORMAT_BY_SUBSAMPLING = {
+    "420": vs.YUV420P10,
+    "422": vs.YUV422P10,
+    "444": vs.YUV444P10,
+}
+
 
 def _cache_dir() -> Path:
     override = os.environ.get("RIFE_TRT_CACHE_DIR")
@@ -15,6 +23,41 @@ def _cache_dir() -> Path:
     trt_cache_dir = Path(__file__).resolve().parents[1] / "cache" / "rife-trt"
     trt_cache_dir.mkdir(parents=True, exist_ok=True)
     return trt_cache_dir
+
+
+def _runtime_conf() -> dict[str, str]:
+    path = Path(__file__).resolve().parent / "runtime.conf"
+    conf: dict[str, str] = {}
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            conf[key.strip()] = value.strip()
+    except OSError:
+        pass
+    return conf
+
+
+def _output_subsampling(source: vs.VideoNode) -> str:
+    value = _runtime_conf().get("rife_output_subsampling", "source").lower()
+    if value in _P10_FORMAT_BY_SUBSAMPLING:
+        return value
+    if (
+        value == "source"
+        and source.format is not None
+        and source.format.color_family == vs.YUV
+        and source.format.bits_per_sample == 10
+        and source.format.sample_type == vs.INTEGER
+        and source.format.subsampling_w in (0, 1)
+        and source.format.subsampling_h in (0, 1)
+    ):
+        if source.format.subsampling_w == 0 and source.format.subsampling_h == 0:
+            return "444"
+        if source.format.subsampling_w == 1 and source.format.subsampling_h == 0:
+            return "422"
+    return "420"
 
 
 def _gpu_input(clip: vs.VideoNode) -> vs.VideoNode:
@@ -46,6 +89,9 @@ def _cpu_rife(
     width: int | None = None,
     height: int | None = None,
 ) -> vs.VideoNode:
+    if os.environ.get("RIFE_ALLOW_INLINE_TRT_BUILD") != "1":
+        raise RuntimeError(_MISSING_TRT_CACHE)
+
     from vsrife import rife
 
     resize_args = {
@@ -66,16 +112,7 @@ def _cpu_rife(
         trt=True,
         trt_cache_dir=str(_cache_dir()),
     )
-    out_format = vs.YUV420P10
-    if (
-        source.format is not None
-        and source.format.color_family == vs.YUV
-        and source.format.bits_per_sample == 10
-        and source.format.sample_type == vs.INTEGER
-        and source.format.subsampling_w in (0, 1)
-        and source.format.subsampling_h in (0, 1)
-    ):
-        out_format = source.format.id
+    out_format = _P10_FORMAT_BY_SUBSAMPLING[_output_subsampling(source)]
 
     return core.resize.Bicubic(
         clip,
@@ -117,8 +154,11 @@ def run_rife_profile(
             scale=scale,
             factor_num=factor_num,
             factor_den=factor_den,
+            output_subsampling=_output_subsampling(source),
         )
     except Exception as gpu_exc:
+        if _MISSING_TRT_CACHE in str(gpu_exc) or "TensorRT cache is missing" in str(gpu_exc):
+            raise
         try:
             return _cpu_rife(
                 source,
@@ -130,6 +170,8 @@ def run_rife_profile(
                 height=target_h,
             )
         except Exception as cpu_exc:
+            if _MISSING_TRT_CACHE in str(cpu_exc):
+                raise
             fmt_name = getattr(source.format, "name", "?")
             sys.stderr.write(
                 f"[rife.vpy] GPU path failed for {fmt_name}: "

@@ -307,7 +307,24 @@ def _ensure_engines(model: str, h: int, w: int, scale: float,
     ph = math.ceil(h / tmp) * tmp
 
     flow_path, enc_path = _vsrife_engine_paths(model, ph, pw, scale, fp16, device)
-    if not flow_path.exists():
+    requires_encode = model in (
+        "4.7", "4.8", "4.9",
+        "4.10", "4.11", "4.12", "4.12.lite",
+        "4.13", "4.13.lite", "4.14", "4.14.lite",
+        "4.15", "4.15.lite", "4.16.lite",
+        "4.17", "4.17.lite", "4.18", "4.19",
+        "4.20", "4.21", "4.22", "4.22.lite",
+        "4.25", "4.25.lite", "4.25.heavy",
+        "4.26", "4.26.heavy",
+    )
+    missing_engine = (not flow_path.exists()) or (requires_encode and enc_path is None)
+    if missing_engine and os.environ.get("RIFE_ALLOW_INLINE_TRT_BUILD") != "1":
+        missing = str(flow_path)
+        if flow_path.exists() and requires_encode and enc_path is None:
+            missing = str(flow_path) + ".encode"
+        raise vs.Error(f"rife_yuv: TensorRT cache is missing: {missing}")
+
+    if missing_engine:
         cache_override = os.environ.get("RIFE_TRT_CACHE_DIR")
         model_dir = Path(cache_override) if cache_override else flow_path.parent
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -329,6 +346,9 @@ def _ensure_engines(model: str, h: int, w: int, scale: float,
         if not flow_path.exists():
             raise vs.Error(f"rife_yuv: engine compile didn't produce expected "
                            f"file: {flow_path}")
+        if requires_encode and enc_path is None:
+            raise vs.Error(f"rife_yuv: engine compile didn't produce expected "
+                           f"file: {flow_path}.encode")
     return flow_path, enc_path
 
 
@@ -415,6 +435,7 @@ def rife_yuv(
     factor_den: int = 1,
     device_index: int = 0,
     color_range: str | None = None,
+    output_subsampling: str = "source",
 ) -> vs.VideoNode:
     """Frame-doubling RIFE with GPU color conversion. Drop-in for the
     sequence
@@ -441,8 +462,21 @@ def rife_yuv(
     # read `_Matrix` per frame inside the ModifyFrame callbacks below.
     device = torch.device("cuda", device_index)
     fp16 = True   # we always feed fp16 RGB to the engine
-    subsampling_w = clip.format.subsampling_w
-    subsampling_h = clip.format.subsampling_h
+    source_subsampling_w = clip.format.subsampling_w
+    source_subsampling_h = clip.format.subsampling_h
+    output_formats = {
+        "420": (1, 1, vs.YUV420P10),
+        "422": (1, 0, vs.YUV422P10),
+        "444": (0, 0, vs.YUV444P10),
+    }
+    if output_subsampling == "source":
+        subsampling_w = source_subsampling_w
+        subsampling_h = source_subsampling_h
+        output_format = clip.format.id
+    else:
+        subsampling_w, subsampling_h, output_format = output_formats.get(
+            output_subsampling, output_formats["420"]
+        )
 
     cfg = _load_engines(model, clip.height, clip.width, scale, fp16, device)
     flownet = cfg["flownet"]; encode = cfg["encode"]
@@ -605,12 +639,23 @@ def rife_yuv(
 
         # Pass-through real frames (t == 0): convert YUV → RGB just to
         # cache (for subsequent interpolated frames), but copy the
-        # source frame straight to the output without RIFE.
+        # source frame straight to the output when its subsampling matches.
         if t == 0:
-            rgb, _, _ = _cache_get(real_n)
+            rgb, _, color = _cache_get(real_n)
             if rgb is None:
                 _convert_and_encode(real_n, f[0])
-            return f[0]   # vapoursynth allows returning the input frame
+                rgb, _, color = _cache_get(real_n)
+            if source_subsampling_w == subsampling_w and source_subsampling_h == subsampling_h:
+                return f[0]   # vapoursynth allows returning the input frame
+            matrix, frame_range = color
+            yq, uq, vq = rgb_to_yuvp10(
+                rgb[:, :, :h, :w],
+                matrix,
+                color_range=frame_range,
+                subsampling_w=subsampling_w,
+                subsampling_h=subsampling_h,
+            )
+            return _planes_to_frame_yuvp10(yq, uq, vq, f[2])
 
         # Interpolated frame: ensure both source frames are in cache,
         # then take a strong reference to the cache entries before we
@@ -672,7 +717,7 @@ def rife_yuv(
         interleaved = interleaved[::factor_den]
         next_clip = next_clip[::factor_den]
 
-    out_skeleton = interleaved.std.BlankClip(keep=True)
+    out_skeleton = interleaved.std.BlankClip(format=output_format, keep=True)
     out = out_skeleton.std.ModifyFrame(
         clips=[interleaved, next_clip, out_skeleton],
         selector=_inference_pass,

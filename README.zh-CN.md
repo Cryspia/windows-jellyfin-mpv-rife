@@ -33,7 +33,7 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 # 完整安装或更新
 .\install.ps1 install
 
-# 更快安装；未缓存的 RIFE 档位会在首次使用时后台编译
+# 更快安装；未缓存的 RIFE 档位会在首次使用时用低优先级后台进程编译
 .\install.ps1 install -SkipRifeTrtPrecompile
 
 # 安装时测试本机 RIFE 能力，并把三档默认倍率写入 runtime.conf
@@ -85,7 +85,7 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 | 源帧率 <= 60 fps | 按刷新率和本机能力选择 x2/x3/x4，默认 RIFE 4.26 scale=1.0 | 独立判断 |
 | 源帧率 > 60 fps | 关闭 | 独立判断 |
 | 源分辨率 <= 1920x1080 | 独立判断 | 开启 NVIDIA d3d11vpp VSR |
-| 源分辨率 > 1920x1080 | 默认测试全分辨率 4.26 x4/x3/x2，失败后才回退到 4.26 scale=0.5 x2；启用 `-EnableDownsampled4kVsr` 时测试下采样后 x4/x3/x2 | 默认关闭；启用下采样路径时用于把 1080p 中间流升回显示尺寸 |
+| 源分辨率 > 1920x1080 | 默认测试全分辨率 4.26 x4/x3/x2，失败后 4K 档可回退到 4.26 scale=0.5 x2；启用 `-EnableDownsampled4kVsr` 时测试下采样后 x4/x3/x2 | 默认关闭；启用下采样路径时用于把 1080p 中间流升回显示尺寸 |
 
 mpv 的实际滤镜顺序是：
 
@@ -93,9 +93,9 @@ mpv 的实际滤镜顺序是：
 vapoursynth(RIFE) -> d3d11vpp(NVIDIA VSR)
 ```
 
-也就是说，低帧率 1080p 内容会先插帧再交给 NVIDIA 驱动级超分；高帧率 1080p 内容只做超分；高于 1080p 的低帧率内容默认保留原始 4K real frames，安装 benchmark 会先尝试全分辨率 `4.26 x4/x3/x2`，都失败才用 `4.26 scale=0.5 x2` 兜底。RIFE 会在“不超过显示器刷新率”的前提下选择最高倍率，最高 x4；例如 24fps 在 60Hz 下最多 x2，在 120Hz 下最多 x4。
+也就是说，低帧率 1080p 内容会先插帧再交给 NVIDIA 驱动级超分；高帧率 1080p 内容只做超分；高于 1080p 的低帧率内容默认保留原始 4K real frames，安装 benchmark 会尝试全分辨率 `4.26 x4/x3/x2`；如果 4K 档都无法通过，可用 `4.26 scale=0.5 x2` 作为最后兜底。RIFE 会在“不超过显示器刷新率”的前提下选择最高倍率，最高 x4；例如 24fps 在 60Hz 下最多 x2，在 120Hz 下最多 x4。
 
-RIFE 的普通路径优先使用 `vs_gpu_helpers.rife_yuv`，把 YUV/RGB 色彩转换和 RIFE 输入/输出放到 CUDA/TensorRT 管线里。GPU 路径只对白名单矩阵和 `limited/full` range 启用；YUV420P10、YUV422P10、YUV444P10 会按原 subsampling 进入 GPU 色转并按原 subsampling 写回插帧结果。其他位深或异常 subsampling 会先规范化到 YUV420P10。可选的 4K 下采样 + VSR 路径也会对 P10 420/422/444 保留原 subsampling；如果输入需要规范化，则使用 YUV420P10 中间流。如果 GPU helper 不可用，会回退到标准 `vsrife + core.resize.Bicubic` CPU 色转路径，而不是直接关闭插帧；如果逐帧颜色元数据不在白名单内，helper 会拒绝处理，避免静默产生错误颜色。HDR10 常见的 YUV420P10 / BT.2020 NCL frame props 会保留，但 RIFE 本身不是线性光 HDR-aware 插帧算法。
+RIFE 的普通路径优先使用 `vs_gpu_helpers.rife_yuv`，把 YUV/RGB 色彩转换和 RIFE 输入/输出放到 CUDA/TensorRT 管线里。GPU 路径只对白名单矩阵和 `limited/full` range 启用；YUV420P10、YUV422P10、YUV444P10 会按原 subsampling 进入 GPU 色转，默认也按原 subsampling 写回插帧结果。`runtime.conf` 可以用 `rife_output_subsampling=420|422|444|source` 手动覆盖；除非在测试特定 VSR/色度路径，否则建议保持 `source`。其他位深或异常 subsampling 会先规范化到 YUV420P10。可选的 4K 下采样 + VSR 路径也会对 P10 420/422/444 保留原 subsampling；如果输入需要规范化，则使用 YUV420P10 中间流。如果 GPU helper 不可用，会回退到标准 `vsrife + core.resize.Bicubic` CPU 色转路径，而不是直接关闭插帧；如果逐帧颜色元数据不在白名单内，helper 会拒绝处理，避免静默产生错误颜色。HDR10 常见的 YUV420P10 / BT.2020 NCL frame props 会保留，但 RIFE 本身不是线性光 HDR-aware 插帧算法。
 
 `-EnableDownsampled4kVsr` 是性能优先的 4K 可选路径：
 
@@ -107,15 +107,15 @@ RIFE 的普通路径优先使用 `vs_gpu_helpers.rife_yuv`，把 YUV/RGB 色彩�
 
 RIFE 默认使用经过 patch 的 TensorRT 混合精度策略。安装器会 patch 上游 `vsrife`，把 TensorRT 编译参数从 `use_explicit_typing=True` 改成 `use_explicit_typing=False` 加 `enabled_precisions={torch.float16, torch.float32}`；这样保留 FP16 吞吐，同时允许 TensorRT 在需要的位置使用 FP32 累加，避免快速运动和 RTX 50 系 / Blackwell 环境下可能出现的光流溢出花帧。
 
-安装时脚本还会用内置的全分辨率和兜底 RIFE 配置预编译常见 720p、1080p 和 4K TensorRT engine；如果启用 `-EnableDownsampled4kVsr`，也会预编译 4K 下采样 profile。这样可以避免播放时触发耗时很长的 TensorRT engine 编译。4K engine 即使在高端显卡上也可能需要数分钟编译；只有在需要快速安装时才建议使用 `-SkipRifeTrtPrecompile`，并接受未缓存的 RIFE 档位会先不插帧播放，同时后台进程编译缺失 engine；编译完成后 mpv 会自动切到请求的 RIFE 模式。
+安装时脚本还会用内置的全分辨率和兜底 RIFE 配置预编译常见 720p、1080p 和 4K TensorRT engine；如果启用 `-EnableDownsampled4kVsr`，也会预编译 4K 下采样 profile。这样可以避免播放时触发耗时很长的 TensorRT engine 编译。4K engine 即使在高端显卡上也可能需要数分钟编译；只有在需要快速安装时才建议使用 `-SkipRifeTrtPrecompile`，并接受未缓存的 RIFE 档位会先不插帧播放，同时独立的低优先级后台 Python 进程编译缺失 cache。如果触发时已经有另一个 RIFE 滤镜在运行，autorife 会先卸掉它，避免 TensorRT 编译和实时 RIFE 推理同时抢 GPU。编译完成后，再按一次 `F9` 启用请求的 RIFE 模式。当前播放中的 VapourSynth 滤镜内 inline 编译仍然被禁止，因为这在 Windows 上可能直接卡死或退出 mpv。
 
-`config/mpv/runtime.conf` 控制运行时策略。可在其中手动设置 `display_refresh`、`vsr_target_w`、`vsr_target_h`，用于多显示器和 VRR 环境下固定刷新率和 VSR 目标尺寸。默认三档能力上限是 `max_factor_720`、`max_factor_1080`、`max_factor_4k`；默认 profile 字段是 `rife_model_720`、`rife_model_1080`、`rife_model_4k`，通常保持 `4.26`。使用 `-BenchmarkRifeRuntime` 安装时，脚本会先用 720p/1080p/4K 的 24fps 合成样片测试 4.26 的 x4/x3/x2，并按一个源帧间隔内所有插帧的合计耗时计算 group p99；group p99 不超过 24fps 源帧预算 41.67ms 时，该倍率进入真实渲染验证。真实渲染验证会启动 mpv 的 `gpu-next`/D3D11 输出并串上 RIFE 与 NVIDIA VSR，按 dropped/mistimed/delayed frame 计数决定是否降档；如果实际渲染墙钟时间超过测试片长度的 2 倍加启动余量，安装器会直接杀掉该 mpv 进程并把该倍率判为失败。如果某档连 4.26 x2 都无法通过，会额外测试 `4.26-half`，也就是 RIFE 4.26 x2 + `scale=0.5` 光流，通过时将该档默认写为 `4.26-half` x2。benchmark 会优先使用 `runtime.conf` 中的 `display_refresh`；为空时会枚举 Windows 当前分辨率下的最高显示模式刷新率，再失败才回退到当前模式或 60Hz。运行时 mpv 仍无法可靠读取完整 VRR range，VRR 用户建议在 `runtime.conf` 明确写入面板上限，例如 `display_refresh=160`。
+`config/mpv/runtime.conf` 控制运行时策略。可在其中手动设置 `display_refresh`、`vsr_target_w`、`vsr_target_h`，用于多显示器和 VRR 环境下固定刷新率和 VSR 目标尺寸。默认三档能力上限是 `max_factor_720`、`max_factor_1080`、`max_factor_4k`；默认 profile 字段是 `rife_model_720`、`rife_model_1080`、`rife_model_4k`，通常保持 `4.26`。使用 `-BenchmarkRifeRuntime` 安装时，脚本会先用 720p/1080p/4K 的 24fps 合成样片测试 4.26 的 x4/x3/x2，并按一个源帧间隔内所有插帧的合计耗时计算 group p99；group p99 不超过 24fps 源帧预算 41.67ms 时，该倍率进入真实渲染验证。真实渲染验证会启动 mpv 的 `gpu-next`/D3D11 输出并串上 RIFE 与 NVIDIA VSR，按 dropped/mistimed/delayed frame 计数决定是否降档；如果实际渲染墙钟时间超过测试片长度的 2 倍加启动余量，安装器会直接杀掉该 mpv 进程并把该倍率判为失败。如果 4K 档连 4.26 x2 都无法通过，安装器可以回退到 `4.26-half`，也就是 RIFE 4.26 x2 + `scale=0.5` 光流。运行时切换会先检查对应 TensorRT cache；缺失时由独立低优先级进程后台编译，播放继续但暂时不启用 RIFE。benchmark 会优先使用 `runtime.conf` 中的 `display_refresh`；为空时会枚举 Windows 当前分辨率下的最高显示模式刷新率，再失败才回退到当前模式或 60Hz。运行时 mpv 仍无法可靠读取完整 VRR range，VRR 用户建议在 `runtime.conf` 明确写入面板上限，例如 `display_refresh=160`。
 
-RIFE 的 VapourSynth 队列默认使用 `rife_buffered_frames=12` 和 `rife_concurrent_frames=4`，用于减少 TensorRT 插帧的帧时间尖峰。显存紧张或想降低延迟时可以手动调低。缺失的运行时 TensorRT engine 默认使用 `trt_cache_build=background`：autorife 会保持视频继续播放但暂不插帧，启动独立 portable Python 进程编译 cache，完成后自动重试当前 RIFE 档位。可改成 `trt_cache_build=skip` 禁止运行时编译；`trt_cache_build=inline` 只建议调试旧的滤镜内编译路径时使用。
+RIFE 的 VapourSynth 队列默认使用 `rife_buffered_frames=12` 和 `rife_concurrent_frames=4`，用于减少 TensorRT 插帧的帧时间尖峰。显存紧张或想降低延迟时可以手动调低。缺失的运行时 TensorRT engine 默认使用 `trt_cache_build=background`：autorife 会保持视频继续播放但暂不启用 RIFE，启动一个独立低优先级 portable Python 进程编译或验证 cache，完成后提示再次按 `F9` 启用。可改成 `trt_cache_build=skip` 禁止运行时编译；`trt_cache_build=inline` 只建议调试旧的滤镜内编译路径。
 
 ## 按键
 
-- `F9`：循环 RIFE 模式 自动默认 x4 -> 4.26 x3 -> 4.26 x2 -> 启用时 4K 下采样+VSR，否则 4.26 x2 scale=0.5 -> 关闭；实际倍率仍受显示刷新率和 `runtime.conf` 能力上限限制。
+- `F9`：循环 RIFE 模式 自动默认 x4 -> 4.26 x3 -> 4.26 x2 -> 启用时 4K 下采样+VSR，否则 >1080p 使用 4.26 x2 scale=0.5 -> 关闭；实际倍率仍受显示刷新率和 `runtime.conf` 能力上限限制。
 - `F10`：弹幕显示开关。
 - `Shift+F10`：弹幕设置面板。
 - `Ctrl+F10`：手动搜索弹幕。
@@ -130,6 +130,8 @@ d3d11vpp=scale=...:scaling-mode=nvidia
 ```
 
 `config/mpv/scripts/autovsr.lua` 会在运行时根据源分辨率追加 `@vsr:d3d11vpp` 滤镜。VSR 倍率按实际显示区域计算：使用 `min(display_width/source_width, display_height/source_height)`，因此在 21:9、16:10、竖屏等异形屏上会按视频实际能填满的限制轴选择倍率，而不会把黑边区域也算进超分目标。多屏环境检测到错误显示器时，可在 `config/mpv/runtime.conf` 里设置 `vsr_target_w` 和 `vsr_target_h` 覆盖目标尺寸。VSR 生效时，`Shift+i 2` 能看到 `d3d11vpp` pass，NVIDIA App 的 RTX Video Enhancement 状态也应从 inactive 变为 active。
+
+本机 VSR 格式测试显示，mpv 的 D3D11 路径可以接受当前项目使用的 YUV 输出（`NV12`、`P010`，以及经过 mpv 上传/转换路径的 10-bit 420/422/444）。不会默认把 RIFE 输出改成 `RGBA/BGRA` 直送 `d3d11vpp`，因为测试中这条路径会产生 D3D11 texture view 错误。
 
 如果安装器不能确认系统 VSR 注册表状态，只会提示你检查 NVIDIA App / Control Panel，不会静默 fallback 到 mpv GLSL shader。`-EnableGlslUpscaleFallback` 只保留给手动调试。
 

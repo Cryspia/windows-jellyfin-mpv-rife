@@ -227,6 +227,7 @@ function Copy-ExampleIfMissing {
 
 function Initialize-Config {
     Write-Step "Initializing persistent config inside portable"
+    Ensure-Directory (Join-Path $CacheDir "rife-trt\.validated")
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "mpv.conf.example") (Join-Path $MpvConfigDir "mpv.conf")
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "input.conf.example") (Join-Path $MpvConfigDir "input.conf")
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "runtime.conf.example") (Join-Path $MpvConfigDir "runtime.conf")
@@ -258,10 +259,12 @@ function Initialize-Config {
         rife_model_4k = "4.26"
         rife_buffered_frames = "12"
         rife_concurrent_frames = "4"
+        rife_output_subsampling = "source"
         enable_4k_downsample_vsr = "no"
         allow_runtime_trt_build = "no"
         trt_cache_build = "background"
     }
+    Set-RuntimeConfigValues @{ trt_cache_build = "background" }
     if ($EnableDownsampled4kVsr) {
         Set-RuntimeConfigValues @{
             enable_4k_downsample_vsr = "yes"
@@ -1318,6 +1321,7 @@ set PYTHONPATH=%PY%\Lib\site-packages
 set PYTHONIOENCODING=utf-8
 set VSSCRIPT_PATH=%PY%\Lib\site-packages\vapoursynth\vsscript.dll
 set DANMAKU_CACHE_DIR=%ROOT%\config\cache\danmaku
+set RIFE_TRT_CACHE_DIR=%ROOT%\config\cache\rife-trt
 set MPV_HOME=%CFG%
 set PATH=%PY%;%PY%\Scripts;%PY%\Lib\site-packages;%PY%\Lib\site-packages\vapoursynth;%PY%\Lib\site-packages\torch\lib;%PY%\Lib\site-packages\torch_tensorrt\lib;%PY%\Lib\site-packages\tensorrt_libs;%PATH%
 start "" "%MPV%" --config-dir="%CFG%" %*
@@ -1533,6 +1537,7 @@ try {
     $env:PATH = "$PythonDir;$(Join-Path $PythonDir 'Scripts');$(Join-Path $PythonDir 'Lib\site-packages');$(Join-Path $PythonDir 'Lib\site-packages\vapoursynth');$(Join-Path $PythonDir 'Lib\site-packages\torch\lib');$(Join-Path $PythonDir 'Lib\site-packages\torch_tensorrt\lib');$(Join-Path $PythonDir 'Lib\site-packages\tensorrt_libs');$env:PATH"
     $env:MPV_HOME = $MpvConfigDir
     $env:DANMAKU_CACHE_DIR = Join-Path $CacheDir "danmaku"
+    $env:RIFE_TRT_CACHE_DIR = Join-Path $CacheDir "rife-trt"
     $argList = @(
         (Join-Path $ScriptDir "shim-entry.py"),
         "--gui",
@@ -2806,7 +2811,7 @@ function Measure-RifeRuntimeCapability {
             }
         }
         if ($best -lt 2) {
-            if ((24 * 2) -le ($refresh + 0.01)) {
+            if ($tier.Height -gt 1080 -and (24 * 2) -le ($refresh + 0.01)) {
                 $result = Invoke-RifeRuntimeBenchmarkCase $tier.Width $tier.Height 2 "4.26" 0.5 -UseGpuYuv -BudgetMs $sourceBudgetMs
                 Write-Host ("{0} 4.26 x2 scale=0.5 fallback: group-p99={1:n2}ms, source-budget={2:n2}ms" -f $tier.Label, [double]$result.group_p99_ms, $sourceBudgetMs)
                 if ([double]$result.group_p99_ms -le $sourceBudgetMs) {
@@ -2822,7 +2827,7 @@ function Measure-RifeRuntimeCapability {
                 }
             }
             if ($best -lt 2) {
-                $best = 0
+            $best = 0
             }
         }
         $values[$tier.Key] = $best
@@ -2840,6 +2845,7 @@ function Set-PortablePythonEnvironment {
         $env:PYTHONHOME = $PythonDir
         $env:PYTHONPATH = Join-Path $PythonDir "Lib\site-packages"
         $env:VSSCRIPT_PATH = Join-Path $PythonDir "Lib\site-packages\vapoursynth\vsscript.dll"
+        $env:RIFE_TRT_CACHE_DIR = Join-Path $CacheDir "rife-trt"
         $env:PATH = "$PythonDir;$(Join-Path $PythonDir 'Scripts');$(Join-Path $PythonDir 'Lib\site-packages');$(Join-Path $PythonDir 'Lib\site-packages\vapoursynth');$(Join-Path $PythonDir 'Lib\site-packages\torch\lib');$(Join-Path $PythonDir 'Lib\site-packages\torch_tensorrt\lib');$(Join-Path $PythonDir 'Lib\site-packages\tensorrt_libs');$env:PATH"
     }
 }
