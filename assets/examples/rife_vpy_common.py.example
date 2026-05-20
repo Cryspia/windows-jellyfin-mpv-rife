@@ -40,8 +40,12 @@ def _runtime_conf() -> dict[str, str]:
     return conf
 
 
-def _output_subsampling(source: vs.VideoNode) -> str:
+def _output_subsampling(source: vs.VideoNode, *, allow_auto: bool = False) -> str:
     value = _runtime_conf().get("rife_output_subsampling", "source").lower()
+    if allow_auto and value == "auto":
+        return "auto"
+    if value == "auto":
+        value = "source"
     if value in _P10_FORMAT_BY_SUBSAMPLING:
         return value
     if (
@@ -58,6 +62,11 @@ def _output_subsampling(source: vs.VideoNode) -> str:
         if source.format.subsampling_w == 1 and source.format.subsampling_h == 0:
             return "422"
     return "420"
+
+
+def _chroma_upsample() -> str:
+    value = _runtime_conf().get("rife_chroma_upsample", "bilinear").lower()
+    return value if value in ("krig", "bilinear") else "bilinear"
 
 
 def _gpu_input(clip: vs.VideoNode) -> vs.VideoNode:
@@ -154,7 +163,8 @@ def run_rife_profile(
             scale=scale,
             factor_num=factor_num,
             factor_den=factor_den,
-            output_subsampling=_output_subsampling(source),
+            output_subsampling=_output_subsampling(source, allow_auto=True),
+            chroma_upsample=_chroma_upsample(),
         )
     except Exception as gpu_exc:
         if _MISSING_TRT_CACHE in str(gpu_exc) or "TensorRT cache is missing" in str(gpu_exc):

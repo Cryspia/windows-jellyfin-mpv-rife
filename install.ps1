@@ -5,7 +5,6 @@ param(
     [switch]$SkipDownloads,
     [switch]$KeepDownloads,
     [switch]$PurgeConfig,
-    [switch]$EnableGlslUpscaleFallback,
     [switch]$SkipRifeTrtPrecompile,
     [switch]$BenchmarkRifeRuntime,
     [switch]$EnableDownsampled4kVsr
@@ -259,12 +258,20 @@ function Initialize-Config {
         rife_model_4k = "4.26"
         rife_buffered_frames = "12"
         rife_concurrent_frames = "4"
-        rife_output_subsampling = "source"
+        rife_chroma_upsample = "krig"
+        rife_output_subsampling = "auto"
+        enable_vsr = "yes"
         enable_4k_downsample_vsr = "no"
         allow_runtime_trt_build = "no"
         trt_cache_build = "background"
     }
-    Set-RuntimeConfigValues @{ trt_cache_build = "background" }
+    Set-RuntimeConfigValues @{
+        trt_cache_build = "background"
+        rife_chroma_upsample = "krig"
+        rife_output_subsampling = "auto"
+        enable_vsr = "yes"
+    }
+    Remove-RuntimeConfigKeys @("enable_krig_shader")
     if ($EnableDownsampled4kVsr) {
         Set-RuntimeConfigValues @{
             enable_4k_downsample_vsr = "yes"
@@ -275,11 +282,13 @@ function Initialize-Config {
         Set-RuntimeConfigValues @{ enable_4k_downsample_vsr = "no" }
     }
 
-    $shaderSource = Join-Path $AssetsDir "shaders\FSRCNNX_x2_8-0-4-1.glsl"
     $shaderTargetDir = Join-Path $MpvConfigDir "shaders"
-    if ((Test-Path $shaderSource) -and $EnableGlslUpscaleFallback) {
-        Ensure-Directory $shaderTargetDir
-        Copy-ExampleIfMissing $shaderSource (Join-Path $shaderTargetDir "FSRCNNX_x2_8-0-4-1.glsl")
+    $legacyKrigShader = Join-Path $shaderTargetDir "KrigBilateral.glsl"
+    if ((Test-Path $legacyKrigShader) -and -not $DryRun) {
+        Remove-Item -LiteralPath $legacyKrigShader -Force
+    }
+    if ((Test-Path $shaderTargetDir) -and -not (Get-ChildItem -LiteralPath $shaderTargetDir -Force -ErrorAction SilentlyContinue) -and -not $DryRun) {
+        Remove-Item -LiteralPath $shaderTargetDir -Force
     }
 }
 
@@ -293,7 +302,7 @@ function Update-MpvRuntimePolicyConfig {
             $content = $content -replace '(?ms)\r?\n?\[rife-4k60-heavy\]\s*.*?(?=\r?\n\[no-rife-high-fps-or-large\])', ''
             $content = $content -replace '(?ms)\r?\n?\[no-rife-high-fps-or-large\]\s*.*?(?=\r?\n\[|\z)', ''
             $content = $content -replace '(?m)^# Windows default:.*(?:autorife\.lua|autovsr\.lua).*$',
-                '# Windows default: scripts/autorife.lua manages RIFE and scripts/autovsr.lua appends @vsr:d3d11vpp after any RIFE vf.'
+                '# Windows default: scripts/autorife.lua manages RIFE; scripts/autovsr.lua manages @vsr:d3d11vpp.'
             Set-Content -LiteralPath $mpvConf -Value $content.TrimEnd() -Encoding UTF8
         }
     }
@@ -748,6 +757,53 @@ function Install-PythonPackages {
             Write-Warn "TensorRT package install failed. RIFE config requests trt=True, so test-rife may fail until TensorRT wheels are available for this Python/CUDA combination."
             Write-Warn $_.Exception.Message
         }
+    }
+}
+
+function Install-KrigChromaExtension {
+    $pythonExe = Join-Path $PythonDir "python.exe"
+    $source = Join-Path $AssetsDir "python\fsrcnnx_cudnn"
+    $target = Join-Path $PythonDir "Lib\site-packages\fsrcnnx_cudnn"
+
+    if (-not (Test-Path $source)) {
+        Write-Warn "KrigBilateral chroma package asset is missing; RIFE will use bilinear chroma fallback."
+        return
+    }
+    if (-not (Test-Path $pythonExe)) {
+        throw "Portable Python is missing: $pythonExe"
+    }
+
+    Write-Step "Installing prebuilt KrigBilateral chroma extension"
+    if ($DryRun) {
+        Write-Host "DRY-RUN: copy $source -> $target"
+        return
+    }
+
+    Ensure-Directory (Split-Path -Parent $target)
+    Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
+    Ensure-Directory $target
+    $nestedTarget = Join-Path $target "fsrcnnx_cudnn"
+    Remove-Item -LiteralPath $nestedTarget -Recurse -Force -ErrorAction SilentlyContinue
+    Copy-Item -Path (Join-Path $source "*") -Destination $target -Recurse -Force
+
+    $code = @'
+import torch
+from fsrcnnx_cudnn.chroma_krig import precompile
+
+precompile()
+y = torch.full((1, 1, 32, 32), 0.5, device="cuda", dtype=torch.float16)
+u = torch.full((1, 1, 16, 16), 0.0, device="cuda", dtype=torch.float16)
+v = torch.full((1, 1, 16, 16), 0.0, device="cuda", dtype=torch.float16)
+from fsrcnnx_cudnn.chroma_krig import krig_bilateral_chroma
+uo, vo = krig_bilateral_chroma(y, u, v, h_out=32, w_out=32)
+torch.cuda.synchronize()
+assert tuple(uo.shape) == (1, 1, 32, 32)
+assert tuple(vo.shape) == (1, 1, 32, 32)
+print("krig chroma ok")
+'@
+    $ok = Test-PythonModule $pythonExe $code -ShowOutput
+    if (-not $ok) {
+        Write-Warn "KrigBilateral prebuilt extension did not validate; runtime will fall back to bilinear/source-subsampling behavior."
     }
 }
 
@@ -2269,6 +2325,40 @@ function Set-RuntimeConfigValues {
     Set-Content -LiteralPath $path -Value $lines -Encoding UTF8
 }
 
+function Remove-RuntimeConfigKeys {
+    param([string[]]$Keys)
+
+    $path = Join-Path $MpvConfigDir "runtime.conf"
+    if (-not (Test-Path $path)) {
+        return
+    }
+    if ($DryRun) {
+        foreach ($key in $Keys) {
+            Write-Host "DRY-RUN: remove runtime.conf $key"
+        }
+        return
+    }
+
+    $patterns = @{}
+    foreach ($key in $Keys) {
+        $patterns[$key] = "^\s*$([regex]::Escape($key))\s*="
+    }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in Get-Content -LiteralPath $path) {
+        $remove = $false
+        foreach ($pattern in $patterns.Values) {
+            if ($line -match $pattern) {
+                $remove = $true
+                break
+            }
+        }
+        if (-not $remove) {
+            $lines.Add($line)
+        }
+    }
+    Set-Content -LiteralPath $path -Value $lines -Encoding UTF8
+}
+
 function Add-RuntimeConfigDefaultValues {
     param([hashtable]$Values)
 
@@ -2884,7 +2974,7 @@ function Test-NvidiaVideoSuperResolution {
 
     if ($matches.Count -eq 0) {
         Write-Warn "Could not confirm RTX Video Super Resolution registry state. Confirm it is enabled in NVIDIA App / NVIDIA Control Panel before relying on driver-level upscaling."
-        Write-Warn "This installer will not silently enable GLSL upscaling. Use -EnableGlslUpscaleFallback only for manual debugging."
+        Write-Warn "This installer will not silently enable another upscaling path."
     } else {
         $matches | Format-Table -AutoSize
         Write-Warn "Review the values above. If RTX Video Super Resolution is off, enable it in NVIDIA App / NVIDIA Control Panel."
@@ -2901,7 +2991,7 @@ function Test-Mpv {
         throw "Sample video missing: $sample"
     }
     Set-PortablePythonEnvironment
-    Invoke-Logged $mpvCli @("--config-dir=$MpvConfigDir", "--frames=1", "--no-audio", "--msg-level=all=v", $sample)
+    Invoke-Logged $mpvCli @("--config-dir=$MpvConfigDir", "--load-scripts=no", "--frames=1", "--no-audio", "--msg-level=all=v", $sample)
 }
 
 function Test-Rife {
@@ -2974,6 +3064,7 @@ function Install-All {
     Install-Mpv
     Install-Ffmpeg
     Install-PythonPackages
+    Install-KrigChromaExtension
     Update-VsrifeTensorRtPrecision
     Ensure-RifeModels
     Install-Danmaku

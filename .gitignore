@@ -5,6 +5,7 @@
 
 # Local secrets, logs, caches, and temporary backup folders
 /.tmp-*/
+/.tmp/
 *.log
 
 # Editor / OS noise

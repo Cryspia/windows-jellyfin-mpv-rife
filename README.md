@@ -95,7 +95,7 @@ vapoursynth(RIFE) -> d3d11vpp(NVIDIA VSR)
 
 Low-fps 1080p content is interpolated first and then passed to driver-level upscaling. High-fps 1080p content uses VSR only. Low-fps content above 1080p keeps original 4K real frames by default; the installer benchmark tries full-resolution `4.26 x4/x3/x2`; if none pass for the 4K tier, it may use `4.26 scale=0.5 x2` as the final fallback. RIFE picks the highest factor that does not exceed the display refresh rate, up to x4; for example, 24fps caps at x2 on 60Hz and x4 on 120Hz.
 
-The normal RIFE path prefers `vs_gpu_helpers.rife_yuv`, which keeps YUV/RGB conversion and RIFE input/output on the CUDA/TensorRT path. The GPU path only runs for whitelisted matrices and `limited/full` ranges; YUV420P10, YUV422P10, and YUV444P10 enter GPU color conversion with their original subsampling and interpolated frames are written back with the same subsampling by default. `runtime.conf` can override this with `rife_output_subsampling=420|422|444|source`; keep `source` unless testing a specific VSR/chroma path. Other bit depths or unusual subsampling are normalized to YUV420P10 first. The optional 4K downsample + VSR path also preserves the source subsampling for P10 420/422/444; inputs that need normalization use a YUV420P10 intermediate. If the GPU helper is unavailable, the scripts fall back to the standard `vsrife + core.resize.Bicubic` CPU color-conversion path instead of disabling interpolation outright; if per-frame color metadata is outside the whitelist, the helper refuses to process it rather than silently producing wrong colors. Common HDR10 YUV420P10 / BT.2020 NCL frame props are preserved, but RIFE itself is not a linear-light HDR-aware interpolation algorithm.
+The normal RIFE path prefers `vs_gpu_helpers.rife_yuv`, which keeps YUV/RGB conversion and RIFE input/output on the CUDA/TensorRT path. The GPU path only runs for whitelisted matrices and `limited/full` ranges. YUV420P10/YUV422P10 sources use the bundled prebuilt CUDA KrigBilateral chroma extension by default to reconstruct RGB444 before RIFE; YUV444P10 enters without chroma upsampling. With `rife_output_subsampling=auto`, interpolated output is written as YUV444P10 only when Krig is available. If the Krig extension is missing or `rife_chroma_upsample=bilinear`, output preserves source subsampling, matching the older behavior. `runtime.conf` can override this with `rife_output_subsampling=auto|420|422|444|source` and `rife_chroma_upsample=krig|bilinear`. Other bit depths or unusual subsampling are normalized to YUV420P10 first. The optional 4K downsample + VSR path follows the same policy after the downsample step. If the GPU helper is unavailable, the scripts fall back to the standard `vsrife + core.resize.Bicubic` CPU color-conversion path instead of disabling interpolation outright; if per-frame color metadata is outside the whitelist, the helper refuses to process it rather than silently producing wrong colors. Common HDR10 YUV420P10 / BT.2020 NCL frame props are preserved, but RIFE itself is not a linear-light HDR-aware interpolation algorithm.
 
 `-EnableDownsampled4kVsr` enables a performance-first 4K path:
 
@@ -116,6 +116,7 @@ The RIFE VapourSynth queue defaults to `rife_buffered_frames=12` and `rife_concu
 ## Keybindings
 
 - `F9` cycles RIFE modes auto/default x4 -> 4.26 x3 -> 4.26 x2 -> 4K downsample+VSR when enabled, otherwise 4.26 x2 scale=0.5 for >1080p -> off; the effective factor is still limited by display refresh and `runtime.conf` capability caps.
+- `F8` toggles NVIDIA VSR for the current mpv session. It is enabled by default through `enable_vsr=yes`.
 - `F10` toggles danmaku visibility.
 - `Shift+F10` opens the danmaku settings panel.
 - `Ctrl+F10` opens manual danmaku search.
@@ -123,17 +124,17 @@ The RIFE VapourSynth queue defaults to `rife_buffered_frames=12` and `rife_concu
 
 ## NVIDIA Video Super Resolution
 
-On Windows, the default upscaler is NVIDIA's driver-level D3D11 Video Processor path, not a GLSL shader:
+On Windows, the upscaler is NVIDIA's driver-level D3D11 Video Processor path:
 
 ```text
 d3d11vpp=scale=...:scaling-mode=nvidia
 ```
 
-`config/mpv/scripts/autovsr.lua` appends the `@vsr:d3d11vpp` filter at runtime when the source resolution is at or below 1080p. The VSR scale is computed from the actual aspect-preserving render fit with `min(display_width/source_width, display_height/source_height)`, so ultrawide, 16:10, portrait, and other non-16:9 screens do not count letterbox or pillarbox space as part of the upscale target. On multi-monitor setups, set `vsr_target_w` and `vsr_target_h` in `config/mpv/runtime.conf` to override the detected target size. When VSR is active, `Shift+i 2` should show a `d3d11vpp` pass, and NVIDIA App's RTX Video Enhancement status should become active.
+`config/mpv/scripts/autovsr.lua` appends the `@vsr:d3d11vpp` filter at runtime when the source resolution is at or below 1080p. The VSR scale is computed from the actual aspect-preserving render fit with `min(display_width/source_width, display_height/source_height)`, so ultrawide, 16:10, portrait, and other non-16:9 screens do not count letterbox or pillarbox space as part of the upscale target. On multi-monitor setups, set `vsr_target_w` and `vsr_target_h` in `config/mpv/runtime.conf` to override the detected target size. When VSR is active, `Shift+i 2` should show a `d3d11vpp` pass, and NVIDIA App's RTX Video Enhancement status should become active. `F8` disables or re-enables the driver VSR filter for the current session.
 
 Local VSR format testing showed that mpv's D3D11 path accepts the YUV outputs used here (`NV12`, `P010`, and 10-bit 420/422/444 through mpv's upload/conversion path). Direct `RGBA/BGRA` input into `d3d11vpp` is not used because it produced D3D11 texture-view errors on the tested system.
 
-If the installer cannot confirm the registry state for NVIDIA VSR, it warns you to check NVIDIA App / Control Panel. It does not silently fall back to GLSL upscaling. `-EnableGlslUpscaleFallback` exists only for manual debugging.
+If the installer cannot confirm the registry state for NVIDIA VSR, it warns you to check NVIDIA App / Control Panel. It does not silently fall back to another upscaling path.
 
 ## Danmaku
 
@@ -173,7 +174,7 @@ windows-jellyfin-mpv-rife/
 │   │   ├── autorife.lua.example
 │   │   ├── autovsr.lua.example
 │   │   └── shim-conf.json.example
-│   └── shaders/
+│   └── python/        # prebuilt KrigBilateral chroma CUDA extension and source
 └── jellyfin-mpv-shim-portable/   # generated by install.ps1, gitignored
 ```
 
@@ -201,3 +202,4 @@ The host must still provide the NVIDIA driver and enabled RTX Video Super Resolu
 - Successful installs clean `_downloads` and temporary extraction directories by default. Use `-KeepDownloads` while debugging installer issues.
 - Rerun `install.ps1 install` to sync updates from the upstream danmaku script.
 - If interpolated frames are corrupted after an update, delete `jellyfin-mpv-shim-portable/config/cache/rife-trt/` and rerun `install.ps1 install` so TensorRT engines rebuild with the patched mixed-precision policy.
+

@@ -1,8 +1,10 @@
 local mp = require("mp")
 local msg = require("mp.msg")
+local utils = require("mp.utils")
 
 local applying = false
 local last_scale = nil
+local vsr_enabled = true
 
 local function current_script_dir()
     local ok, dir = pcall(mp.get_script_directory)
@@ -15,7 +17,7 @@ local function current_script_dir()
 end
 
 local script_dir = current_script_dir()
-local config_dir = require("mp.utils").join_path(script_dir, "..")
+local config_dir = utils.join_path(script_dir, "..")
 
 local function has_vsr(vf)
     return vf and string.find(vf, "@vsr", 1, true) ~= nil
@@ -31,7 +33,7 @@ end
 
 local function read_runtime_conf()
     local conf = {}
-    local path = mp.find_config_file("runtime.conf") or require("mp.utils").join_path(config_dir, "runtime.conf")
+    local path = mp.find_config_file("runtime.conf") or utils.join_path(config_dir, "runtime.conf")
     if not path then
         return conf
     end
@@ -48,6 +50,19 @@ local function read_runtime_conf()
     end
     f:close()
     return conf
+end
+
+local function bool_enabled(value, default)
+    if value == nil or value == "" then
+        return default
+    end
+    value = tostring(value):lower()
+    return value == "1" or value == "yes" or value == "true" or value == "on"
+end
+
+local function initialize_runtime_flags()
+    local conf = read_runtime_conf()
+    vsr_enabled = bool_enabled(conf.enable_vsr, true)
 end
 
 local function read_target_dims()
@@ -87,6 +102,16 @@ local function autovsr()
     local video_height = mp.get_property_native("height")
     local pixfmt = mp.get_property_native("video-params/hw-pixelformat") or mp.get_property_native("video-params/pixelformat")
     local vf = mp.get_property("vf")
+
+    if not vsr_enabled then
+        if has_vsr(vf) then
+            applying = true
+            mp.commandv("vf", "remove", "@vsr")
+            last_scale = nil
+            applying = false
+        end
+        return
+    end
 
     if not video_width or not video_height then
         return
@@ -145,9 +170,31 @@ end
 
 local function schedule_autovsr()
     autovsr()
-    mp.add_timeout(0.25, autovsr)
+    mp.add_timeout(0.25, function()
+        autovsr()
+    end)
 end
 
+local function toggle_vsr()
+    vsr_enabled = not vsr_enabled
+    if not vsr_enabled then
+        if has_vsr(mp.get_property("vf")) then
+            applying = true
+            mp.commandv("vf", "remove", "@vsr")
+            applying = false
+        end
+        last_scale = nil
+        mp.osd_message("NVIDIA VSR: off", 1.5)
+        msg.info("NVIDIA VSR manually disabled")
+    else
+        mp.osd_message("NVIDIA VSR: on", 1.5)
+        msg.info("NVIDIA VSR manually enabled")
+        schedule_autovsr()
+    end
+end
+
+initialize_runtime_flags()
+mp.add_key_binding("F8", "toggle-nvidia-vsr", toggle_vsr)
 mp.observe_property("display-width", "native", schedule_autovsr)
 mp.observe_property("display-height", "native", schedule_autovsr)
 mp.observe_property("width", "native", schedule_autovsr)

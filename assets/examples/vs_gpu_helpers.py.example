@@ -55,6 +55,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 import vapoursynth as vs
 
+_krig_bilateral_chroma = None
+_krig_import_error: Exception | None = None
+
+
+def _load_krig_bilateral_chroma():
+    global _krig_bilateral_chroma, _krig_import_error
+    if _krig_bilateral_chroma is not None:
+        return _krig_bilateral_chroma
+    if _krig_import_error is not None:
+        raise _krig_import_error
+    try:
+        from fsrcnnx_cudnn.chroma_krig import krig_bilateral_chroma
+        _krig_bilateral_chroma = krig_bilateral_chroma
+        return _krig_bilateral_chroma
+    except Exception as exc:
+        _krig_import_error = exc
+        raise
+
+
+def krig_chroma_available() -> bool:
+    try:
+        _load_krig_bilateral_chroma()
+        return True
+    except Exception:
+        return False
+
 
 # =============================================================================
 # Color conversion math
@@ -118,6 +144,7 @@ def yuvp10_to_rgb(
     matrix: str,
     *,
     color_range: str = "limited",
+    chroma_upsample: str = "bilinear",
     out_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     """Convert YUV P10 4:2:0 / 4:2:2 / 4:4:4 to RGB float16/float32.
@@ -125,7 +152,7 @@ def yuvp10_to_rgb(
     Returns (1, 3, H, W) tensor on the same device as the inputs.
     `color_range` is "limited" or "full" and must match the source
     `_ColorRange` metadata.
-    Uses bilinear chroma upsampling when needed; 4:4:4 input already
+    Uses the requested chroma upsampling when needed; 4:4:4 input already
     has full-resolution chroma and passes through at native chroma size.
     """
     device = y_plane.device
@@ -137,11 +164,21 @@ def yuvp10_to_rgb(
     # Chroma upsample to 4:4:4. F.interpolate operates on (N, C, H, W).
     h, w = y.shape
     if u.shape != (h, w):
-        u = F.interpolate(u[None, None], size=(h, w),
-                          mode="bilinear", align_corners=False)[0, 0]
-    if v.shape != (h, w):
-        v = F.interpolate(v[None, None], size=(h, w),
-                          mode="bilinear", align_corners=False)[0, 0]
+        if chroma_upsample.lower() == "krig":
+            krig = _load_krig_bilateral_chroma()
+            u4, v4 = krig(y[None, None], u[None, None], v[None, None], h_out=h, w_out=w)
+            u = u4[0, 0].to(torch.float32)
+            v = v4[0, 0].to(torch.float32)
+        else:
+            u = F.interpolate(u[None, None], size=(h, w),
+                              mode="bilinear", align_corners=False)[0, 0]
+            v = F.interpolate(v[None, None], size=(h, w),
+                              mode="bilinear", align_corners=False)[0, 0]
+    elif v.shape != (h, w):
+        raise RuntimeError(
+            f"mismatched chroma plane shapes: U={tuple(u.shape)} "
+            f"V={tuple(v.shape)} Y={tuple(y.shape)}"
+        )
 
     # Matrix multiply. Stack into (H, W, 3) [Y, U, V], then dot.
     yuv = torch.stack([y, u, v], dim=-1)  # (H, W, 3)
@@ -436,6 +473,7 @@ def rife_yuv(
     device_index: int = 0,
     color_range: str | None = None,
     output_subsampling: str = "source",
+    chroma_upsample: str = "bilinear",
 ) -> vs.VideoNode:
     """Frame-doubling RIFE with GPU color conversion. Drop-in for the
     sequence
@@ -469,6 +507,9 @@ def rife_yuv(
         "422": (1, 0, vs.YUV422P10),
         "444": (0, 0, vs.YUV444P10),
     }
+    chroma_upsample = (chroma_upsample or "bilinear").lower()
+    if output_subsampling == "auto":
+        output_subsampling = "444" if chroma_upsample == "krig" and krig_chroma_available() else "source"
     if output_subsampling == "source":
         subsampling_w = source_subsampling_w
         subsampling_h = source_subsampling_h
@@ -599,6 +640,7 @@ def rife_yuv(
                 yp, up, vp = _frame_yuvp10_to_planes(src_frame, device)
                 rgb = yuvp10_to_rgb(yp, up, vp, matrix,
                                     color_range=frame_range,
+                                    chroma_upsample=chroma_upsample,
                                     out_dtype=torch.float16)
                 if need_pad:
                     rgb = F.pad(rgb, padding)

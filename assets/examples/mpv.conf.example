@@ -26,5 +26,4 @@ secondary-sub-pos=0
 
 # Windows default: scripts/autorife.lua manages RIFE and scripts/autovsr.lua
 # appends @vsr:d3d11vpp after any RIFE vf.
-# Do not load GLSL upscalers by default. If NVIDIA VSR is off, enable it in
-# NVIDIA App / Control Panel instead of silently falling back to shader upscale.
+# If NVIDIA VSR is off, enable it in NVIDIA App / Control Panel.

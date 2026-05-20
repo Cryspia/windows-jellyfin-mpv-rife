@@ -10,6 +10,10 @@ display_refresh=
 vsr_target_w=
 vsr_target_h=
 
+# Driver-level NVIDIA VSR is enabled by default. F8 toggles VSR for the
+# current mpv session.
+enable_vsr=yes
+
 # Optional 4K path: downsample >1080p sources to 1080p, run RIFE there,
 # then let NVIDIA VSR upscale the stream back to the display size.
 # Default is no, which keeps original 4K real frames and uses 4.26-half as
@@ -33,11 +37,15 @@ rife_model_4k=4.26
 rife_buffered_frames=12
 rife_concurrent_frames=4
 
-# RIFE output chroma layout. "source" preserves YUV420P10/YUV422P10/YUV444P10
-# source subsampling after RGB RIFE; use 444/422/420 only for explicit testing.
-# NVIDIA d3d11vpp VSR is tested to accept the YUV paths here, but RGB/BGRA
-# output is not used because mpv's D3D11 path is unstable with it.
-rife_output_subsampling=source
+# RIFE chroma conversion policy. "krig" uses the bundled prebuilt CUDA
+# KrigBilateral extension for YUV420/422 -> RGB444 before RIFE. If the
+# extension is unavailable, runtime falls back to bilinear chroma upsampling.
+rife_chroma_upsample=krig
+
+# RIFE output chroma layout. "auto" writes YUV444P10 only when Krig is
+# available; otherwise it preserves source subsampling. Use 444/422/420/source
+# for explicit testing.
+rife_output_subsampling=auto
 
 # Runtime behavior when a matching TensorRT engine is missing.
 # Default is background: mpv keeps playing without RIFE while a separate
