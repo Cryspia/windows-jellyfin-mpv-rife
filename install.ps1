@@ -2521,7 +2521,7 @@ function Invoke-RifeRuntimeBenchmarkCase {
         [switch]$UseGpuYuv,
         [switch]$DownsampleTo1080,
         [double]$BudgetMs = 41.667,
-        [int]$TimeoutSeconds = 240
+        [int]$TimeoutSeconds = 900
     )
 
     $pythonExe = Join-Path $PythonDir "python.exe"
@@ -2617,6 +2617,8 @@ print(json.dumps({
     }
 
     Set-PortablePythonEnvironment
+    $previousInlineTrtBuild = $env:RIFE_ALLOW_INLINE_TRT_BUILD
+    $env:RIFE_ALLOW_INLINE_TRT_BUILD = "1"
     Set-Content -LiteralPath $scriptPath -Value $code -Encoding UTF8
     $stdoutPath = Join-Path $LogsDir ("rife-benchmark-" + [Guid]::NewGuid().ToString("N") + ".out.log")
     $stderrPath = Join-Path $LogsDir ("rife-benchmark-" + [Guid]::NewGuid().ToString("N") + ".err.log")
@@ -2639,6 +2641,11 @@ print(json.dumps({
         }
         return ($jsonLine | ConvertFrom-Json)
     } finally {
+        if ($null -eq $previousInlineTrtBuild) {
+            Remove-Item Env:\RIFE_ALLOW_INLINE_TRT_BUILD -ErrorAction SilentlyContinue
+        } else {
+            $env:RIFE_ALLOW_INLINE_TRT_BUILD = $previousInlineTrtBuild
+        }
         Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
     }
