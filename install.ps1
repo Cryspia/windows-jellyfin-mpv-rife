@@ -303,6 +303,16 @@ function Update-MpvRuntimePolicyConfig {
             $content = $content -replace '(?ms)\r?\n?\[no-rife-high-fps-or-large\]\s*.*?(?=\r?\n\[|\z)', ''
             $content = $content -replace '(?m)^# Windows default:.*(?:autorife\.lua|autovsr\.lua).*$',
                 '# Windows default: scripts/autorife.lua manages RIFE; scripts/autovsr.lua manages @vsr:d3d11vpp.'
+            foreach ($line in @("d3d11-exclusive-fs=no", "d3d11-flip=no")) {
+                $key = ($line -split "=", 2)[0]
+                if ($content -match "(?m)^\s*$([regex]::Escape($key))\s*=") {
+                    $content = $content -replace "(?m)^\s*$([regex]::Escape($key))\s*=.*$", $line
+                } elseif ($content -match "(?m)^gpu-context=d3d11\s*$") {
+                    $content = $content -replace "(?m)^gpu-context=d3d11\s*$", "gpu-context=d3d11`r`n$line"
+                } else {
+                    $content = "$line`r`n" + $content
+                }
+            }
             Set-Content -LiteralPath $mpvConf -Value $content.TrimEnd() -Encoding UTF8
         }
     }

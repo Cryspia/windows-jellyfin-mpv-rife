@@ -4,6 +4,8 @@
 vo=gpu-next
 gpu-api=d3d11
 gpu-context=d3d11
+d3d11-exclusive-fs=no
+d3d11-flip=no
 hwdec=d3d11va
 profile=gpu-hq
 
