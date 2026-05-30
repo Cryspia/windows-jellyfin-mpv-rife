@@ -1395,7 +1395,7 @@ start "" "%MPV%" --config-dir="%CFG%" %*
 
     $startShimBatText = @"
 @echo off
-pwsh.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0start-shim.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0start-shim.ps1"
 "@
 
     $shimEntryText = @"
@@ -1407,7 +1407,7 @@ if __name__ == "__main__":
 
     $stopShimBatText = @"
 @echo off
-pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop-shim.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop-shim.ps1"
 "@
 
     $registerMpvAssocPs1Text = @'
@@ -1476,7 +1476,7 @@ Write-Host "Windows protects default-app selection; choose MPV Portable from Set
 
     $registerMpvAssocBatText = @"
 @echo off
-pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0register-mpv-file-association.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0register-mpv-file-association.ps1"
 pause
 "@
 
@@ -1513,7 +1513,7 @@ Write-Host "If Windows still shows it in Default apps, restart Explorer or sign 
 
     $unregisterMpvAssocBatText = @"
 @echo off
-pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0unregister-mpv-file-association.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0unregister-mpv-file-association.ps1"
 pause
 "@
 
@@ -1907,7 +1907,8 @@ function Update-ShimConfig {
     & $setJson $json "mpv_ext_path" "mpv\mpv.exe"
     & $setJson $json "mpv_ext_ipc" $null
     & $setJson $json "screenshot_dir" $null
-    $json | ConvertTo-Json -Depth 20 | Set-Content -Path $conf -Encoding UTF8
+    $jsonText = $json | ConvertTo-Json -Depth 20
+    [System.IO.File]::WriteAllText($conf, $jsonText, [System.Text.UTF8Encoding]::new($false))
 }
 
 function Remove-LegacyShimMpvCopies {
@@ -2217,31 +2218,41 @@ function Invoke-MpvRifePrecompile {
     $stdoutPath = Join-Path $LogsDir ("rife-precompile-" + [Guid]::NewGuid().ToString("N") + ".out.log")
     $stderrPath = Join-Path $LogsDir ("rife-precompile-" + [Guid]::NewGuid().ToString("N") + ".err.log")
     Set-PortablePythonEnvironment
+    $previousInlineTrtBuild = $env:RIFE_ALLOW_INLINE_TRT_BUILD
     $env:RIFE_TRT_CACHE_DIR = (Join-Path $CacheDir "rife-trt")
-    $args = @(
-        "--config-dir=$precompileConfigDir",
-        "--load-scripts=no",
-        "--vo=null",
-        "--ao=null",
-        "--frames=3",
-        "--msg-level=all=v",
-        "--vf=vapoursynth=file=~~/$VpyName",
-        $SamplePath
-    )
+    $env:RIFE_ALLOW_INLINE_TRT_BUILD = "1"
+    try {
+        $args = @(
+            "--config-dir=$precompileConfigDir",
+            "--load-scripts=no",
+            "--vo=null",
+            "--ao=null",
+            "--frames=3",
+            "--msg-level=all=v",
+            "--vf=vapoursynth=file=~~/$VpyName",
+            $SamplePath
+        )
 
-    $p = Start-Process -FilePath $mpvCli -ArgumentList $args -WorkingDirectory $ProjectRoot -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-    $output = ""
-    if (Test-Path $stdoutPath) {
-        $output += Get-Content -LiteralPath $stdoutPath -Raw
-    }
-    if (Test-Path $stderrPath) {
-        $output += Get-Content -LiteralPath $stderrPath -Raw
-    }
-    if (($p.ExitCode -ne 0) -or ($output -match "Script evaluation failed|Disabling filter vapoursynth|could not init VS")) {
-        Write-Warn "RIFE TensorRT precompile failed. Logs kept for inspection:"
-        Write-Warn $stdoutPath
-        Write-Warn $stderrPath
-        throw "RIFE TensorRT precompile failed for $Label / $VpyName"
+        $p = Start-Process -FilePath $mpvCli -ArgumentList $args -WorkingDirectory $ProjectRoot -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        $output = ""
+        if (Test-Path $stdoutPath) {
+            $output += Get-Content -LiteralPath $stdoutPath -Raw
+        }
+        if (Test-Path $stderrPath) {
+            $output += Get-Content -LiteralPath $stderrPath -Raw
+        }
+        if (($p.ExitCode -ne 0) -or ($output -match "Script evaluation failed|Disabling filter vapoursynth|could not init VS")) {
+            Write-Warn "RIFE TensorRT precompile failed. Logs kept for inspection:"
+            Write-Warn $stdoutPath
+            Write-Warn $stderrPath
+            throw "RIFE TensorRT precompile failed for $Label / $VpyName"
+        }
+    } finally {
+        if ($null -eq $previousInlineTrtBuild) {
+            Remove-Item Env:\RIFE_ALLOW_INLINE_TRT_BUILD -ErrorAction SilentlyContinue
+        } else {
+            $env:RIFE_ALLOW_INLINE_TRT_BUILD = $previousInlineTrtBuild
+        }
     }
 
     Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
