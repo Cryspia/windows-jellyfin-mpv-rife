@@ -538,9 +538,19 @@ apply = function()
     if applying then return end
     local conf = read_runtime_conf()
     local factor, model, reason = choose_factor(conf)
+    local height = mp.get_property_native("height")
 
     if factor == 0 and reason == "missing source fps/height" then
         return false
+    end
+
+    if factor > 0 and height and height > 1080 and model == "4.26" then
+        local full_cache_ok, full_cache_reason = trt_cache_has_engine(model)
+        if not full_cache_ok then
+            model = "4.26-half"
+            factor = math.min(factor, 2)
+            reason = reason .. "; full-scale 4K cache not ready (" .. full_cache_reason .. "), using half-scale fallback"
+        end
     end
 
     if factor == 0 and has_named_filter("rife") then
