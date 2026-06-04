@@ -1907,6 +1907,8 @@ function Update-ShimConfig {
     & $setJson $json "mpv_ext_path" "mpv\mpv.exe"
     & $setJson $json "mpv_ext_ipc" $null
     & $setJson $json "screenshot_dir" $null
+    & $setJson $json "local_kbps" 2147483
+    & $setJson $json "remote_kbps" 2147483
     $jsonText = $json | ConvertTo-Json -Depth 20
     [System.IO.File]::WriteAllText($conf, $jsonText, [System.Text.UTF8Encoding]::new($false))
 }

@@ -585,6 +585,11 @@ apply = function()
         local buffered_frames = clamp_positive_int(conf.rife_buffered_frames, 12)
         local concurrent_frames = clamp_positive_int(conf.rife_concurrent_frames, 4)
         mp.commandv("vf", "append", string.format("@rife:vapoursynth=file=%s:buffered-frames=%d:concurrent-frames=%d", script_path, buffered_frames, concurrent_frames))
+        -- autovsr.lua can race this script during file load and append @vsr
+        -- just before @rife. RIFE must see source frames, not VSR-upscaled
+        -- frames, otherwise odd aspect-ratio videos request the wrong TRT
+        -- engine size and the VapourSynth filter fails.
+        pcall(mp.commandv, "vf", "remove", "@vsr")
         if model == "4.26-down1080" then
             local vsr_scale = downsample_vsr_scale(conf)
             if vsr_scale then
