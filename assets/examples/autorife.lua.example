@@ -364,6 +364,33 @@ local function start_background_cache_build(model, factor, reason)
     msg.warn("RIFE TRT cache is not ready: " .. reason .. ". Building/validating in background.")
     mp.osd_message("Preparing RIFE TensorRT cache in background", 3.0)
 
+    local poll_count = 0
+    local poll_timer = nil
+    local function poll_cache_ready()
+        poll_count = poll_count + 1
+        if cache_profile_validated(model) then
+            build_jobs[key] = nil
+            active_factor = nil
+            active_model = nil
+            msg.info("RIFE TensorRT cache is ready for " .. key .. "; applying RIFE.")
+            mp.osd_message("RIFE cache ready; enabling interpolation", 2.0)
+            if poll_timer then
+                poll_timer:kill()
+                poll_timer = nil
+            end
+            apply()
+            return
+        end
+        if poll_count >= 180 then
+            build_jobs[key] = nil
+            msg.warn("RIFE TensorRT cache build did not finish within 6 minutes for " .. key)
+            if poll_timer then
+                poll_timer:kill()
+                poll_timer = nil
+            end
+        end
+    end
+
     local args = {
         python,
         helper,
@@ -391,6 +418,7 @@ local function start_background_cache_build(model, factor, reason)
         if success and status == 0 then
             msg.info("RIFE TensorRT cache build launched for " .. key)
             mp.osd_message("RIFE cache is building; press F9 again later", 3.0)
+            poll_timer = mp.add_periodic_timer(2.0, poll_cache_ready)
         else
             local stderr = result and result.stderr or tostring(error or "unknown error")
             build_jobs[key] = nil
