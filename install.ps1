@@ -1907,8 +1907,12 @@ function Update-ShimConfig {
     & $setJson $json "mpv_ext_path" "mpv\mpv.exe"
     & $setJson $json "mpv_ext_ipc" $null
     & $setJson $json "screenshot_dir" $null
-    & $setJson $json "local_kbps" 2147483
-    & $setJson $json "remote_kbps" 2147483
+    # Shim's upstream default remote_kbps=10000 can force remote/reverse-proxy
+    # Jellyfin sessions into HLS transcode and lose HDR/color metadata. Seed an
+    # effectively unlimited default only when the user has not chosen a cap.
+    if (-not ($json.PSObject.Properties.Name -contains "remote_kbps")) {
+        & $setJson $json "remote_kbps" 2147483
+    }
     $jsonText = $json | ConvertTo-Json -Depth 20
     [System.IO.File]::WriteAllText($conf, $jsonText, [System.Text.UTF8Encoding]::new($false))
 }
