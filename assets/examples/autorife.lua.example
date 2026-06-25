@@ -15,6 +15,7 @@ local active_factor = 0
 local active_model = nil
 local last_cache_warning = ""
 local last_cache_warning_time = 0
+local pending_safe_switch = false
 local build_jobs = {}
 local validated_cache = {}
 local apply
@@ -621,12 +622,47 @@ apply = function()
     return true
 end
 
+local function stop_rife_for_safe_switch(target_model, target_factor)
+    pending_safe_switch = true
+    applying = true
+    if has_downsampled_rife_filter() then
+        pcall(mp.commandv, "vf", "remove", "@vsr")
+    end
+    pcall(mp.commandv, "vf", "remove", "@rife")
+    active_factor = 0
+    active_model = nil
+    applying = false
+
+    msg.warn(string.format(
+        "Deferred direct RIFE-to-RIFE hot-switch to avoid mpv/Python crash; stopped current RIFE first. Press F9 again to enable %s x%d.",
+        tostring(target_model),
+        target_factor
+    ))
+    mp.osd_message(string.format("RIFE: off; press F9 again for %s x%d", tostring(target_model), target_factor), 3.0)
+    return true
+end
+
 local function cycle_manual_cap()
     local old_factor = active_factor
     local old_model = active_model
     local old_index = manual_index
     local conf = read_runtime_conf()
 
+    if pending_safe_switch and not has_named_filter("rife") then
+        pending_safe_switch = false
+        active_factor = nil
+        active_model = nil
+        if not apply() then
+            pending_safe_switch = true
+            active_factor = old_factor
+            active_model = old_model
+            manual_index = old_index
+        end
+        return
+    end
+
+    local target_factor = old_factor
+    local target_model = old_model
     for _ = 1, #manual_modes do
         manual_index = manual_index + 1
         if manual_index > #manual_modes then
@@ -634,8 +670,44 @@ local function cycle_manual_cap()
         end
 
         local factor, model = choose_factor(conf)
+        target_factor = factor
+        target_model = model
         if factor ~= old_factor or model ~= old_model then
             break
+        end
+    end
+
+    if target_factor and target_factor > 0 and not bool_enabled(conf.allow_runtime_trt_build) then
+        local build_mode = lower_or_default(conf.trt_cache_build, "background")
+        if build_mode == "background" then
+            local cache_ok, cache_reason = trt_cache_has_engine(target_model)
+            local needs_build = not cache_ok
+            local build_reason = cache_reason
+            if cache_ok and not cache_profile_validated(target_model) then
+                needs_build = true
+                build_reason = "validating existing engine outside mpv"
+            end
+            if needs_build then
+                msg.warn(string.format(
+                    "Target RIFE cache is not ready for %s x%d; switching to no RIFE while cache is prepared.",
+                    tostring(target_model),
+                    target_factor
+                ))
+                if start_background_cache_build(target_model, target_factor, build_reason) then
+                    return
+                end
+                manual_index = old_index
+                active_factor = old_factor
+                active_model = old_model
+                return
+            end
+        end
+    end
+
+    if old_factor and old_factor > 0 and target_factor and target_factor > 0 and has_named_filter("rife") then
+        if target_factor ~= old_factor or target_model ~= old_model then
+            stop_rife_for_safe_switch(target_model, target_factor)
+            return
         end
     end
 

@@ -1236,6 +1236,149 @@ if hasattr(mpv, "MPVError"):
     def _terminate_mpv(self):
 '@
     )
+    if ($patched -notmatch 'PlayerManager::finished_callback starting next episode: current seq=') {
+        $patched = $patched.Replace(
+@'
+        if not url:
+            log.error("PlayerManager::play no URL found")
+            return
+
+        self._play_media(video, url, offset, no_initial_timeline, is_initial_play)
+'@,
+@'
+        if not url:
+            log.error("PlayerManager::play no URL found")
+            return False
+
+        return self._play_media(video, url, offset, no_initial_timeline, is_initial_play)
+'@
+        )
+        $patched = $patched.Replace(
+@'
+        except _mpv_errors:
+            self._handle_mpv_disconnect()
+            return
+        self._player.play(self.url)
+'@,
+@'
+        except _mpv_errors:
+            self._handle_mpv_disconnect()
+            return False
+        self._video = video
+        self._player.play(self.url)
+'@
+        )
+        $patched = $patched.Replace(
+@'
+            # Timeout playback attempt after 10 seconds
+            log.error("Timeout when waiting for media duration. Stopping playback!")
+            self.stop()
+            return
+'@,
+@'
+            log.error(
+                "Timeout when waiting for media duration for item %s (%s). Stopping playback!",
+                getattr(video, "item_id", "unknown"),
+                video.get_proper_title(),
+            )
+            self.stop()
+            return False
+'@
+        )
+        $patched = $patched.Replace(
+@'
+                5000,
+                1,
+            )
+
+    @staticmethod
+'@,
+@'
+                5000,
+                1,
+            )
+        return True
+
+    @staticmethod
+'@
+        )
+        $patched = $patched.Replace(
+@'
+            if has_lock:
+                log.info("PlayerManager::finished_callback starting next episode")
+                new_video = self._video.parent.get_next().video
+                self.send_timeline_stopped(True)
+                if self.syncplay.is_enabled():
+                    self.syncplay.request_next(self._video.get_playlist_id())
+                else:
+                    self.play(new_video)
+'@,
+@'
+            if has_lock:
+                old_video = self._video
+                old_parent = old_video.parent
+                next_media = old_parent.get_next()
+                new_video = next_media.video
+                log.info(
+                    "PlayerManager::finished_callback starting next episode: current seq=%s/%s item=%s title=%r; next seq=%s/%s item=%s title=%r",
+                    old_parent.seq + 1,
+                    len(old_parent.queue),
+                    old_video.item_id,
+                    old_video.get_proper_title(),
+                    next_media.seq + 1,
+                    len(next_media.queue),
+                    new_video.item_id,
+                    new_video.get_proper_title(),
+                )
+                self.send_timeline_stopped(True)
+                if self.syncplay.is_enabled():
+                    self.syncplay.request_next(old_video.get_playlist_id())
+                else:
+                    if not self.play(new_video):
+                        log.error(
+                            "PlayerManager::finished_callback failed to start next episode item=%s title=%r",
+                            new_video.item_id,
+                            new_video.get_proper_title(),
+                        )
+'@
+        )
+        $patched = $patched.Replace(
+@'
+        if self._video.parent.has_next:
+            new_video = self._video.parent.get_next().video
+            self.send_timeline_stopped(True)
+            if self.syncplay.is_enabled():
+                self.syncplay.request_next(self._video.get_playlist_id())
+            else:
+                self.play(new_video)
+            return True
+'@,
+@'
+        if self._video.parent.has_next:
+            old_video = self._video
+            old_parent = old_video.parent
+            next_media = old_parent.get_next()
+            new_video = next_media.video
+            log.info(
+                "PlayerManager::play_next: current seq=%s/%s item=%s title=%r; next seq=%s/%s item=%s title=%r",
+                old_parent.seq + 1,
+                len(old_parent.queue),
+                old_video.item_id,
+                old_video.get_proper_title(),
+                next_media.seq + 1,
+                len(next_media.queue),
+                new_video.item_id,
+                new_video.get_proper_title(),
+            )
+            self.send_timeline_stopped(True)
+            if self.syncplay.is_enabled():
+                self.syncplay.request_next(old_video.get_playlist_id())
+            else:
+                return self.play(new_video)
+            return True
+'@
+        )
+    }
     if ($patched -ne $content) {
         Set-Content -LiteralPath $player -Value $patched -Encoding UTF8
     }
@@ -1907,6 +2050,8 @@ function Update-ShimConfig {
     & $setJson $json "mpv_ext_path" "mpv\mpv.exe"
     & $setJson $json "mpv_ext_ipc" $null
     & $setJson $json "screenshot_dir" $null
+    & $setJson $json "auto_play" $true
+    & $setJson $json "playback_timeout" 60
     # Shim's upstream default remote_kbps=10000 can force remote/reverse-proxy
     # Jellyfin sessions into HLS transcode and lose HDR/color metadata. Seed an
     # effectively unlimited default only when the user has not chosen a cap.

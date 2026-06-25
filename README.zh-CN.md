@@ -107,7 +107,7 @@ RIFE 的普通路径优先使用 `vs_gpu_helpers.rife_yuv`，把 YUV/RGB 色彩�
 
 RIFE 默认使用经过 patch 的 TensorRT 混合精度策略。安装器会 patch 上游 `vsrife`，把 TensorRT 编译参数从 `use_explicit_typing=True` 改成 `use_explicit_typing=False` 加 `enabled_precisions={torch.float16, torch.float32}`；这样保留 FP16 吞吐，同时允许 TensorRT 在需要的位置使用 FP32 累加，避免快速运动和 RTX 50 系 / Blackwell 环境下可能出现的光流溢出花帧。
 
-安装时脚本还会用内置的全分辨率和兜底 RIFE 配置预编译常见 720p、1080p 和 4K TensorRT engine；如果启用 `-EnableDownsampled4kVsr`，也会预编译 4K 下采样 profile。这样可以避免播放时触发耗时很长的 TensorRT engine 编译。4K engine 即使在高端显卡上也可能需要数分钟编译；只有在需要快速安装时才建议使用 `-SkipRifeTrtPrecompile`，并接受未缓存的 RIFE 档位会先不插帧播放，同时独立的低优先级后台 Python 进程编译缺失 cache。如果触发时已经有另一个 RIFE 滤镜在运行，autorife 会先卸掉它，避免 TensorRT 编译和实时 RIFE 推理同时抢 GPU。编译完成后，再按一次 `F9` 启用请求的 RIFE 模式。当前播放中的 VapourSynth 滤镜内 inline 编译仍然被禁止，因为这在 Windows 上可能直接卡死或退出 mpv。
+安装时脚本还会用内置的全分辨率和兜底 RIFE 配置预编译常见 720p、1080p 和 4K TensorRT engine；如果启用 `-EnableDownsampled4kVsr`，也会预编译 4K 下采样 profile。这样可以避免播放时触发耗时很长的 TensorRT engine 编译。4K engine 即使在高端显卡上也可能需要数分钟编译；只有在需要快速安装时才建议使用 `-SkipRifeTrtPrecompile`，并接受未缓存的 RIFE 档位会先不插帧播放，同时独立的低优先级后台 Python 进程编译缺失 cache。如果触发时已经有另一个 RIFE 滤镜在运行，autorife 会先卸掉它，避免 TensorRT 编译和实时 RIFE 推理同时抢 GPU。编译完成后，再按一次 `F9` 启用请求的 RIFE 模式。当前播放中的 VapourSynth 滤镜内 inline 编译仍然被禁止，因为这在 Windows 上可能直接卡死或退出 mpv。RIFE 到 RIFE 的直接热切换也会被保护：当前视频已经挂着 RIFE 滤镜时，如果按 `F9` 切到另一个启用 RIFE 的档位，第一次会先卸掉当前 RIFE 并保持播放，第二次再启用记录下来的目标档位。这样避免在 Windows 上原地替换运行中的 VapourSynth TensorRT 滤镜导致 mpv/Python 崩溃。
 
 `config/mpv/runtime.conf` 控制运行时策略。可在其中手动设置 `display_refresh`、`vsr_target_w`、`vsr_target_h`，用于多显示器和 VRR 环境下固定刷新率和 VSR 目标尺寸。默认三档能力上限是 `max_factor_720`、`max_factor_1080`、`max_factor_4k`；默认 profile 字段是 `rife_model_720`、`rife_model_1080`、`rife_model_4k`，通常保持 `4.26`。使用 `-BenchmarkRifeRuntime` 安装时，脚本会先用 720p/1080p/4K 的 24fps 合成样片测试 4.26 的 x4/x3/x2，并按一个源帧间隔内所有插帧的合计耗时计算 group p99；group p99 不超过 24fps 源帧预算 41.67ms 时，该倍率进入真实渲染验证。真实渲染验证会启动 mpv 的 `gpu-next`/D3D11 输出并串上 RIFE 与 NVIDIA VSR，按 dropped/mistimed/delayed frame 计数决定是否降档；如果实际渲染墙钟时间超过测试片长度的 2 倍加启动余量，安装器会直接杀掉该 mpv 进程并把该倍率判为失败。如果 4K 档连 4.26 x2 都无法通过，安装器可以回退到 `4.26-half`，也就是 RIFE 4.26 x2 + `scale=0.5` 光流。运行时切换会先检查对应 TensorRT cache；缺失时由独立低优先级进程后台编译，播放继续但暂时不启用 RIFE。benchmark 会优先使用 `runtime.conf` 中的 `display_refresh`；为空时会枚举 Windows 当前分辨率下的最高显示模式刷新率，再失败才回退到当前模式或 60Hz。运行时 mpv 仍无法可靠读取完整 VRR range，VRR 用户建议在 `runtime.conf` 明确写入面板上限，例如 `display_refresh=160`。
 
@@ -115,7 +115,7 @@ RIFE 的 VapourSynth 队列默认使用 `rife_buffered_frames=12` 和 `rife_conc
 
 ## 按键
 
-- `F9`：循环 RIFE 模式 自动默认 x4 -> 4.26 x3 -> 4.26 x2 -> 启用时 4K 下采样+VSR，否则 >1080p 使用 4.26 x2 scale=0.5 -> 关闭；实际倍率仍受显示刷新率和 `runtime.conf` 能力上限限制。
+- `F9`：循环 RIFE 模式 自动默认 x4 -> 4.26 x3 -> 4.26 x2 -> 启用时 4K 下采样+VSR，否则 >1080p 使用 4.26 x2 scale=0.5 -> 关闭；实际倍率仍受显示刷新率和 `runtime.conf` 能力上限限制。从一个启用中的 RIFE 档位切到另一个启用中的 RIFE 档位时需要按两次：第一次关闭当前 RIFE 并记录目标，第二次在滤镜卸载后启用目标档。
 - `F8`：切换当前 mpv 会话的 NVIDIA VSR。默认由 `enable_vsr=yes` 开启。
 - `F10`：弹幕显示开关。
 - `Shift+F10`：弹幕设置面板。
