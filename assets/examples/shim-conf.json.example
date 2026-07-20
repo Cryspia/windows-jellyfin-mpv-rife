@@ -5,6 +5,7 @@
   "fullscreen": true,
   "auto_play": true,
   "playback_timeout": 60,
+  "health_check_interval": 30,
   "enable_gui": true,
   "enable_osc": true,
   "media_ended_cmd": null,

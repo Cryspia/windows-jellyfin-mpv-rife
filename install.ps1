@@ -31,6 +31,13 @@ $ShimConfigDir = Join-Path $ConfigDir "jellyfin-mpv-shim"
 $CacheDir = Join-Path $ConfigDir "cache"
 
 $PythonVersion = "3.12.10"
+$ShimVersion = "2.10.0"
+$JellyfinApiClientVersion = "1.15.0"
+$PythonMpvVersion = "1.0.8"
+$PythonMpvJsonIpcVersion = "1.2.2"
+$PyWin32Version = "312"
+$VapourSynthVersion = "77"
+$VsrifeVersion = "5.7.0"
 $PythonZipUrl = "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-embed-amd64.zip"
 $PythonTclTkMsiUrl = "https://www.python.org/ftp/python/$PythonVersion/amd64/tcltk.msi"
 $GetPipUrl = "https://bootstrap.pypa.io/get-pip.py"
@@ -667,7 +674,22 @@ function Test-CorePythonPackages {
     param([string]$PythonExe)
     $code = @"
 import importlib.util
-mods = ["jellyfin_mpv_shim", "vapoursynth", "vsrife", "appdirs"]
+import importlib.metadata as md
+
+expected = {
+    "jellyfin-mpv-shim": "$ShimVersion",
+    "jellyfin-apiclient-python": "$JellyfinApiClientVersion",
+    "python-mpv": "$PythonMpvVersion",
+    "python-mpv-jsonipc": "$PythonMpvJsonIpcVersion",
+    "pywin32": "$PyWin32Version",
+    "vapoursynth": "$VapourSynthVersion",
+    "vsrife": "$VsrifeVersion",
+}
+for name, version in expected.items():
+    if md.version(name) != version:
+        raise SystemExit(1)
+
+mods = ["jellyfin_mpv_shim", "vapoursynth", "vsrife", "appdirs", "win32api"]
 missing = [m for m in mods if importlib.util.find_spec(m) is None]
 raise SystemExit(1 if missing else 0)
 "@
@@ -729,13 +751,17 @@ function Install-PythonPackages {
         Write-Step "Core Python packages already present"
     } else {
         $packages = @(
-            "jellyfin-mpv-shim[gui]",
-            "vapoursynth",
-            "vsrife",
+            "jellyfin-mpv-shim[gui]==$ShimVersion",
+            "jellyfin-apiclient-python==$JellyfinApiClientVersion",
+            "python-mpv==$PythonMpvVersion",
+            "python-mpv-jsonipc==$PythonMpvJsonIpcVersion",
+            "pywin32==$PyWin32Version",
+            "vapoursynth==$VapourSynthVersion",
+            "vsrife==$VsrifeVersion",
             "wheel-stub",
             "appdirs"
         )
-        Invoke-Logged $pythonExe (@("-m", "pip", "install") + $packages)
+        Invoke-Logged $pythonExe (@("-m", "pip", "install", "--upgrade") + $packages)
     }
 
     if (Test-CudaTorch $pythonExe) {
@@ -1428,6 +1454,108 @@ log = logging.getLogger("action_thread")
     }
 }
 
+function Update-ShimNetworkRecovery {
+    $clients = Join-Path $PythonDir "Lib\site-packages\jellyfin_mpv_shim\clients.py"
+    $keepalive = Join-Path $PythonDir "Lib\site-packages\jellyfin_apiclient_python\keepalive.py"
+    $wsClient = Join-Path $PythonDir "Lib\site-packages\jellyfin_apiclient_python\ws_client.py"
+    if (-not (Test-Path $clients) -or -not (Test-Path $keepalive) -or -not (Test-Path $wsClient)) {
+        return
+    }
+    Write-Step "Patching shim network recovery for transient proxy failures"
+    if ($DryRun) {
+        Write-Host "DRY-RUN: patch shim and Jellyfin API client network recovery"
+        return
+    }
+
+    $content = Get-Content -Raw -LiteralPath $clients
+    $patched = $content.Replace(
+@'
+                # WebSocketDisconnect doesn't always happen here.
+                client.callback = lambda *_: None
+                client.callback_ws = lambda *_: None
+                client.stop()
+                client.callback("WebSocketDisconnect", None)
+'@,
+@'
+                # Preserve the event callback before silencing callbacks emitted
+                # by stop(); then synthesize the disconnect that starts reconnect.
+                disconnect_callback = client.callback
+                client.callback = lambda *_: None
+                client.callback_ws = lambda *_: None
+                client.stop()
+                disconnect_callback("WebSocketDisconnect", None)
+'@
+    )
+    $patched = $patched.Replace(
+@'
+                try:
+                    client.jellyfin.post_capabilities(CAPABILITIES)
+                except Exception:
+                    log.warning(
+                        "Failed to post capabilities on reconnect", exc_info=True
+                    )
+'@,
+@'
+                # The websocket can become ready before the HTTP API behind a
+                # reverse proxy. Retry capability registration for 10 seconds.
+                for attempt in range(6):
+                    if self.is_stopping:
+                        break
+                    try:
+                        client.jellyfin.post_capabilities(CAPABILITIES)
+                        break
+                    except Exception:
+                        if attempt == 5:
+                            log.warning(
+                                "Failed to post capabilities on connect", exc_info=True
+                            )
+                        else:
+                            time.sleep(2)
+'@
+    )
+    if ($patched -ne $content) {
+        Set-Content -LiteralPath $clients -Value $patched -Encoding UTF8
+    }
+
+    $content = Get-Content -Raw -LiteralPath $keepalive
+    $patched = $content.Replace(
+@'
+            else:
+                self.ws.send("KeepAlive")
+'@,
+@'
+            else:
+                try:
+                    self.ws.send("KeepAlive")
+                except Exception:
+                    # The websocket reconnect loop owns recovery. A keepalive
+                    # racing with socket shutdown should simply stop.
+                    break
+'@
+    )
+    if ($patched -ne $content) {
+        Set-Content -LiteralPath $keepalive -Value $patched -Encoding UTF8
+    }
+
+    $content = Get-Content -Raw -LiteralPath $wsClient
+    $patched = $content.Replace("import threading`r`nimport ssl", "import threading`r`nimport time`r`nimport ssl")
+    $patched = $patched.Replace("import threading`nimport ssl", "import threading`nimport time`nimport ssl")
+    if ($patched -notmatch 'LOG\.warning\("Websocket disconnected, reconnecting\.\.\."\)\r?\n\s+time\.sleep\(2\)') {
+        $patched = $patched.Replace(
+@'
+            LOG.warning("Websocket disconnected, reconnecting...")
+'@,
+@'
+            LOG.warning("Websocket disconnected, reconnecting...")
+            time.sleep(2)
+'@
+        )
+    }
+    if ($patched -ne $content) {
+        Set-Content -LiteralPath $wsClient -Value $patched -Encoding UTF8
+    }
+}
+
 function Update-MpvJsonIpcForWindowsPipe {
     $ipc = Join-Path $PythonDir "Lib\site-packages\python_mpv_jsonipc.py"
     if (-not (Test-Path $ipc)) {
@@ -2052,6 +2180,11 @@ function Update-ShimConfig {
     & $setJson $json "screenshot_dir" $null
     & $setJson $json "auto_play" $true
     & $setJson $json "playback_timeout" 60
+    # Recover promptly when a reverse proxy or the network drops a Jellyfin
+    # session. Preserve explicit user tuning, but replace the upstream default.
+    if (-not ($json.PSObject.Properties.Name -contains "health_check_interval") -or $json.health_check_interval -eq 300) {
+        & $setJson $json "health_check_interval" 30
+    }
     # Shim's upstream default remote_kbps=10000 can force remote/reverse-proxy
     # Jellyfin sessions into HLS transcode and lose HDR/color metadata. Seed an
     # effectively unlimited default only when the user has not chosen a cap.
@@ -3255,6 +3388,7 @@ function Install-All {
     Update-ShimGuiForPortable
     Update-ShimPlayerForPortable
     Update-ShimActionThreadForRobustness
+    Update-ShimNetworkRecovery
     Update-MpvJsonIpcForWindowsPipe
     Update-ShimConfig
     Remove-LegacyShimMpvCopies
