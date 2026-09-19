@@ -8,7 +8,7 @@
   "health_check_interval": 30,
   "enable_gui": true,
   "start_minimized": true,
-  "enable_osc": true,
+  "osc_style": "mpvtk",
   "media_ended_cmd": null,
   "pre_media_cmd": null,
   "stop_cmd": null

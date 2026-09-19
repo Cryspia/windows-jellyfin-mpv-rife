@@ -1630,6 +1630,15 @@ function Update-ShimConfig {
     }
     & $setJson $json "mpv_ext" $true
     & $setJson $json "enable_gui" $true
+    if ($json.PSObject.Properties.Name -contains "enable_osc") {
+        if (-not ($json.PSObject.Properties.Name -contains "osc_style")) {
+            & $setJson $json "osc_style" $(if ([bool]$json.enable_osc) { "mpvtk" } else { "none" })
+        }
+        $json.PSObject.Properties.Remove("enable_osc")
+    }
+    if (-not ($json.PSObject.Properties.Name -contains "osc_style")) {
+        & $setJson $json "osc_style" "mpvtk"
+    }
     if (-not ($json.PSObject.Properties.Name -contains "start_minimized")) {
         & $setJson $json "start_minimized" $true
     }
