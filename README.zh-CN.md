@@ -33,6 +33,9 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 # 完整安装或更新
 .\install.ps1 install
 
+# 选择 portable 界面字体的 CJK 字形地区（默认 sc）
+.\install.ps1 install -CjkFontLanguage jp
+
 # 更快安装；未缓存的 RIFE 档位会在首次使用时用低优先级后台进程编译
 .\install.ps1 install -SkipRifeTrtPrecompile
 
@@ -77,6 +80,12 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 | `jellyfin-mpv-shim-portable/scripts/unregister-mpv-file-association.bat` | 移除上述当前用户“打开方式”注册 |
 
 根目录只保留双击入口；其他维护脚本在 `jellyfin-mpv-shim-portable/scripts/`。安装器会优先用系统自带的 .NET C# 编译器生成可固定到开始菜单/任务栏的 `.exe` 启动器；如果目标电脑没有编译器，则自动保留 `.bat` 启动器。Windows 10/11 会保护默认应用选择，安装器不会静默抢占视频文件关联。需要把本项目 MPV 设为默认播放器时，先运行 `scripts/register-mpv-file-association.bat`，再在“设置 > 应用 > 默认应用”里选择 `MPV Portable`，或右键视频文件选择“打开方式 > 选择其他应用”。
+
+安装器当前固定使用 Jellyfin MPV Shim 3.0.0、Jellyfin API Client 1.18.0、python-mpv-jsonipc 1.4.0、VapourSynth R80、PyTorch 2.12.1 CUDA 13.0、Torch-TensorRT 2.12.1、TensorRT 10.16.1.11 和 vsrife 5.7.0。暂不使用 Torch-TensorRT 2.13：vsrife 5.7 仍依赖 2.12 的混合精度编译接口，而 2.13 已移除相关参数，会静默忽略本项目用于防止光流溢出的精度策略。
+
+Shim 3 已用 mpv 内绘制的媒体库和设置界面替代旧 Tk 配置窗口。`start-shim` 默认最小化到托盘；通过托盘图标的“Show Library Browser”或“Configure Servers”打开界面。升级时会保留现有 `cred.json` 服务器凭据。
+
+生成的 portable 会附带按地区选择的 Noto Sans CJK，供 Shim 3 使用 Pillow 预渲染媒体库标题和说明文字。`-CjkFontLanguage sc|tc|hk|jp|kr` 分别选择简体中文、繁体中文、香港中文、日文或韩文字形，默认是 `sc`。在 `sc` 模式下，Shim 会优先使用 Windows 自带的微软雅黑常规/粗体，以提高中文界面的清晰度；系统缺少雅黑时回退到 portable 内的 Noto Sans SC。其他模式优先使用所选地区的 portable Noto 字体。用不同参数重新运行安装器会替换回退字体并更新优先级。附带字体使用 SIL Open Font License，许可证文件与字体放在同一目录。
 
 ## 默认播放管线
 
@@ -182,9 +191,10 @@ windows-jellyfin-mpv-rife/
 
 | 路径 | 用途 |
 |---|---|
-| `python/` | portable CPython、pip 包、Tk、VapourSynth、Torch、TensorRT、RIFE |
+| `python/` | portable CPython、pip 包、VapourSynth、Torch、TensorRT、RIFE、Jellyfin MPV Shim |
 | `mpv/` | portable mpv |
 | `tools/` | ffmpeg / ffprobe |
+| `fonts/` | 按地区选择的 portable Noto Sans CJK 界面字体、语言标记及 OFL 许可证 |
 | `config/mpv/` | mpv 配置、runtime.conf、RIFE vpy、autorife/autovsr、弹幕脚本 |
 | `config/jellyfin-mpv-shim/` | shim 配置和服务器凭据 |
 | `config/logs/` | shim 和 mpv 日志 |

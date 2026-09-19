@@ -7,7 +7,9 @@ param(
     [switch]$PurgeConfig,
     [switch]$SkipRifeTrtPrecompile,
     [switch]$BenchmarkRifeRuntime,
-    [switch]$EnableDownsampled4kVsr
+    [switch]$EnableDownsampled4kVsr,
+    [ValidateSet("sc", "tc", "hk", "jp", "kr")]
+    [string]$CjkFontLanguage = "sc"
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,30 +27,31 @@ $LogsDir = Join-Path $ConfigDir "logs"
 $MpvDir = Join-Path $PortableDir "mpv"
 $PythonDir = Join-Path $PortableDir "python"
 $ToolsDir = Join-Path $PortableDir "tools"
+$FontsDir = Join-Path $PortableDir "fonts"
 $ScriptsDir = Join-Path $PortableDir "scripts"
 $MpvConfigDir = Join-Path $ConfigDir "mpv"
 $ShimConfigDir = Join-Path $ConfigDir "jellyfin-mpv-shim"
 $CacheDir = Join-Path $ConfigDir "cache"
 
 $PythonVersion = "3.12.10"
-$ShimVersion = "2.10.0"
-$JellyfinApiClientVersion = "1.15.0"
+$ShimVersion = "3.0.0"
+$JellyfinApiClientVersion = "1.18.0"
 $PythonMpvVersion = "1.0.8"
-$PythonMpvJsonIpcVersion = "1.2.2"
+$PythonMpvJsonIpcVersion = "1.4.0"
 $PyWin32Version = "312"
-$VapourSynthVersion = "77"
+$VapourSynthVersion = "80"
 $VsrifeVersion = "5.7.0"
 $PythonZipUrl = "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-embed-amd64.zip"
-$PythonTclTkMsiUrl = "https://www.python.org/ftp/python/$PythonVersion/amd64/tcltk.msi"
 $GetPipUrl = "https://bootstrap.pypa.io/get-pip.py"
 $SevenZipUrl = "https://www.7-zip.org/a/7zr.exe"
 $FfmpegZipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 $DanmakuZipUrl = "https://github.com/Cryspia/mpv-dandanplay-danmaku/archive/refs/heads/main.zip"
+$GoogleFontsRawBase = "https://raw.githubusercontent.com/google/fonts/main/ofl"
 $PyTorchCudaIndex = "https://download.pytorch.org/whl/test/cu130"
-$NvidiaPipIndex = "https://pypi.ngc.nvidia.com"
-$TorchVersion = "2.11.0"
-$TensorRtVersion = "10.15.1.29"
-$TorchTensorRtVersion = "2.11.0"
+$NvidiaPipIndex = "https://pypi.nvidia.com"
+$TorchVersion = "2.12.1"
+$TensorRtVersion = "10.16.1.11"
+$TorchTensorRtVersion = "2.12.1"
 
 $MpvRootLauncherExe = Join-Path $PortableDir "MPV Portable.exe"
 $MpvRootLauncherBat = Join-Path $PortableDir "MPV Portable.bat"
@@ -142,7 +145,12 @@ function Download-File {
     )
 
     if (Test-Path $Path) {
-        return
+        if ((Get-Item -LiteralPath $Path).Length -gt 0) {
+            return
+        }
+        if (-not $DryRun) {
+            Remove-Item -LiteralPath $Path -Force
+        }
     }
     if ($SkipDownloads) {
         throw "Missing download and -SkipDownloads was specified: $Path"
@@ -153,7 +161,25 @@ function Download-File {
         Write-Host "DRY-RUN: Invoke-WebRequest $Url -> $Path"
         return
     }
-    Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing
+    $partialPath = "$Path.partial"
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $partialPath -Force -ErrorAction SilentlyContinue
+            Invoke-WebRequest -Uri $Url -OutFile $partialPath -UseBasicParsing
+            if (-not (Test-Path $partialPath) -or (Get-Item -LiteralPath $partialPath).Length -eq 0) {
+                throw "Download produced an empty file."
+            }
+            Move-Item -LiteralPath $partialPath -Destination $Path -Force
+            return
+        } catch {
+            Remove-Item -LiteralPath $partialPath -Force -ErrorAction SilentlyContinue
+            if ($attempt -eq 3) {
+                throw
+            }
+            Write-Warn "Download attempt $attempt failed; retrying in $attempt second(s): $($_.Exception.Message)"
+            Start-Sleep -Seconds $attempt
+        }
+    }
 }
 
 function Expand-Zip {
@@ -207,7 +233,7 @@ function Initialize-Layout {
     Write-Step "Preparing project directories"
     foreach ($dir in @(
         $PortableDir, $ConfigDir, $LogsDir, $MpvConfigDir, $ShimConfigDir,
-        $ScriptsDir,
+        $ScriptsDir, $FontsDir,
         $CacheDir, $DownloadsDir, $ToolsDir
     )) {
         Ensure-Directory $dir
@@ -497,69 +523,6 @@ function Install-Python {
     Invoke-Logged $pythonExe @($getPip, "--no-warn-script-location")
 }
 
-function Test-Tkinter {
-    $pythonExe = Join-Path $PythonDir "python.exe"
-    return (Test-PythonModule $pythonExe "import tkinter as tk`nroot = tk.Tk()`nroot.destroy()")
-}
-
-function Install-Tkinter {
-    if (Test-Tkinter) {
-        Write-Step "Portable tkinter already works"
-        return
-    }
-    Write-Step "Installing portable Tcl/Tk for tkinter"
-    $msi = Join-Path $DownloadsDir "tcltk-$PythonVersion-amd64.msi"
-    if ($DryRun) {
-        Write-Host "DRY-RUN: install Tcl/Tk from $PythonTclTkMsiUrl"
-        return
-    } elseif ($SkipDownloads) {
-        $existing = Get-ChildItem -Path $DownloadsDir -File -Filter "tcltk*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $existing) {
-            throw "Put tcltk.msi into $DownloadsDir or remove -SkipDownloads."
-        }
-        $msi = $existing.FullName
-    } else {
-        Download-File $PythonTclTkMsiUrl $msi
-    }
-
-    $tmp = Join-Path $PortableDir "_tcltk_extract"
-    if (Test-Path $tmp) {
-        Remove-Item -LiteralPath $tmp -Recurse -Force
-    }
-    Ensure-Directory $tmp
-    $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList @("/a", $msi, "TARGETDIR=$tmp", "/qn") -Wait -PassThru
-    if ($proc.ExitCode -ne 0) {
-        throw "msiexec failed to extract Tcl/Tk MSI, exit code $($proc.ExitCode)"
-    }
-
-    foreach ($name in @("_tkinter.pyd", "tcl86t.dll", "tk86t.dll", "zlib1.dll")) {
-        $src = Join-Path $tmp "DLLs\$name"
-        if (-not (Test-Path $src)) {
-            throw "Missing Tcl/Tk file after extraction: $src"
-        }
-        Copy-Item -LiteralPath $src -Destination $PythonDir -Force
-    }
-    Copy-Item -LiteralPath (Join-Path $tmp "Lib\tkinter") -Destination (Join-Path $PythonDir "Lib\tkinter") -Recurse -Force
-    Copy-Item -LiteralPath (Join-Path $tmp "tcl") -Destination (Join-Path $PythonDir "tcl") -Recurse -Force
-
-    $pth = Get-ChildItem -Path $PythonDir -Filter "python*._pth" | Select-Object -First 1
-    if ($pth) {
-        $content = Get-Content $pth.FullName
-        if ($content -notcontains "Lib") {
-            $content = @("Lib") + $content
-        }
-        if ($content -notcontains "Lib\site-packages") {
-            $content += "Lib\site-packages"
-        }
-        Set-Content -Path $pth.FullName -Value $content -Encoding ASCII
-    }
-
-    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
-    if (-not (Test-Tkinter)) {
-        throw "Portable tkinter import test failed after installing Tcl/Tk."
-    }
-}
-
 function Install-Mpv {
     $mpvExe = Join-Path $MpvDir "mpv.exe"
     if (Test-Path $mpvExe) {
@@ -796,6 +759,68 @@ function Install-PythonPackages {
     }
 }
 
+function Install-ShimFonts {
+    $families = @{
+        sc = @{ Folder = "notosanssc"; File = "NotoSansSC%5Bwght%5D.ttf"; Name = "Noto Sans SC" }
+        tc = @{ Folder = "notosanstc"; File = "NotoSansTC%5Bwght%5D.ttf"; Name = "Noto Sans TC" }
+        hk = @{ Folder = "notosanshk"; File = "NotoSansHK%5Bwght%5D.ttf"; Name = "Noto Sans HK" }
+        jp = @{ Folder = "notosansjp"; File = "NotoSansJP%5Bwght%5D.ttf"; Name = "Noto Sans JP" }
+        kr = @{ Folder = "notosanskr"; File = "NotoSansKR%5Bwght%5D.ttf"; Name = "Noto Sans KR" }
+    }
+    $family = $families[$CjkFontLanguage]
+    Write-Step ("Installing portable CJK UI font: {0} ({1})" -f $family.Name, $CjkFontLanguage)
+    Ensure-Directory $FontsDir
+    $fontPath = Join-Path $FontsDir "NotoSansCJK-VF.ttf"
+    $licensePath = Join-Path $FontsDir "NotoSansCJK-OFL.txt"
+    $languagePath = Join-Path $FontsDir "cjk-language.txt"
+
+    # Migrate the first SC-only portable layout without redownloading it.
+    $legacyFont = Join-Path $FontsDir "NotoSansSC-VF.ttf"
+    $legacyLicense = Join-Path $FontsDir "NotoSansSC-OFL.txt"
+    if ($CjkFontLanguage -eq "sc" -and -not (Test-Path $fontPath) -and (Test-Path $legacyFont)) {
+        if (-not $DryRun) {
+            Move-Item -LiteralPath $legacyFont -Destination $fontPath
+            if (Test-Path $legacyLicense) {
+                Move-Item -LiteralPath $legacyLicense -Destination $licensePath -Force
+            }
+            Set-Content -LiteralPath $languagePath -Value "sc" -Encoding ASCII
+        }
+    }
+
+    $installedLanguage = if (Test-Path $languagePath) {
+        (Get-Content -Raw -LiteralPath $languagePath).Trim().ToLowerInvariant()
+    } else {
+        ""
+    }
+    $fontReady = (Test-Path $fontPath) -and (Test-Path $licensePath) -and
+        ($installedLanguage -eq $CjkFontLanguage)
+    if (-not $fontReady) {
+        if ($SkipDownloads) {
+            throw "Portable CJK font '$CjkFontLanguage' is not installed; rerun without -SkipDownloads to switch fonts."
+        }
+        $downloadFont = Join-Path $DownloadsDir ("NotoSansCJK-{0}-VF.ttf" -f $CjkFontLanguage)
+        $downloadLicense = Join-Path $DownloadsDir ("NotoSansCJK-{0}-OFL.txt" -f $CjkFontLanguage)
+        Download-File ("$GoogleFontsRawBase/{0}/{1}" -f $family.Folder, $family.File) $downloadFont
+        Download-File ("$GoogleFontsRawBase/{0}/OFL.txt" -f $family.Folder) $downloadLicense
+        if (-not $DryRun) {
+            $downloaded = Get-Item -LiteralPath $downloadFont
+            if ($downloaded.Length -lt 1MB) {
+                throw "Downloaded CJK font is unexpectedly small: $downloadFont"
+            }
+            Copy-Item -LiteralPath $downloadFont -Destination $fontPath -Force
+            Copy-Item -LiteralPath $downloadLicense -Destination $licensePath -Force
+            Set-Content -LiteralPath $languagePath -Value $CjkFontLanguage -Encoding ASCII
+        }
+    }
+
+    if (-not $DryRun) {
+        $font = Get-Item -LiteralPath $fontPath
+        if ($font.Length -lt 1MB) {
+            throw "Installed CJK font is unexpectedly small: $fontPath"
+        }
+    }
+}
+
 function Install-KrigChromaExtension {
     $pythonExe = Join-Path $PythonDir "python.exe"
     $source = Join-Path $AssetsDir "python\fsrcnnx_cudnn"
@@ -927,705 +952,136 @@ function Install-Danmaku {
     }
 }
 
-function Update-ShimGuiForPortable {
-    $gui = Join-Path $PythonDir "Lib\site-packages\jellyfin_mpv_shim\gui_mgr.py"
-    if (-not (Test-Path $gui)) {
-        return
+function Update-ShimPortablePaths {
+    $options = Join-Path $PythonDir "Lib\site-packages\jellyfin_mpv_shim\mpv_options.py"
+    if (-not (Test-Path $options)) {
+        throw "jellyfin-mpv-shim $ShimVersion mpv_options.py is missing: $options"
     }
-    Write-Step "Patching shim tray menu for portable server configuration"
+    Write-Step "Patching shim 3 portable mpv path/config directory"
     if ($DryRun) {
-        Write-Host "DRY-RUN: patch tray menu in $gui"
+        Write-Host "DRY-RUN: patch portable paths in $options"
         return
     }
-    $content = Get-Content -Raw -LiteralPath $gui
-    $content = [Regex]::Replace(
-        $content,
-        '(?s)\Afrom PIL import Image\r?\nfrom collections import deque\r?\nimport subprocess\r?\nfrom multiprocessing import Process, Queue\r?\n(?:import threading\r?\n|import sys\r?\n|import logging\r?\n|import queue\r?\n|import os\r?\n|import time\r?\n)+',
-@'
-from PIL import Image
-from collections import deque
-import subprocess
-from multiprocessing import Process, Queue
-import threading
-import sys
-import logging
-import queue
-import os
-import time
 
-'@
-    )
-    $patched = $content.Replace(
-@'
-        def get_wrapper(command):
-            def wrapper():
-                self.r_queue.put((command, None))
-
-            return wrapper
-
-        def die():
-'@,
-@'
-        def get_wrapper(command):
-            def wrapper(*_args):
-                self.r_queue.put((command, None))
-
-            return wrapper
-
-        def die(*_args):
-'@
-    )
-    $patched = $patched.Replace(
-@'
-        def die(*_args):
-            # We don't call self.icon_stop() because it crashes on Linux now...
-            if sys.platform == "linux":
-                # This kills the status icon uncleanly.
-                self.r_queue.put(("die", None))
-            else:
-                self.icon_stop()
-'@,
-@'
-        def die(*_args):
-            self.r_queue.put(("die", None))
-            if sys.platform != "linux":
-                try:
-                    self.icon_stop()
-                except Exception:
-                    pass
-'@
-    )
-    $patched = [Regex]::Replace(
-        $patched,
-        '(?s)\n        def configure_servers\(\):.*?\n        menu_items = \[',
-@'
-
-        menu_items = [
-'@
-    )
-    $patterns = @(
-@'
-        menu_items = [
-            MenuItem(_("Configure Servers"), get_wrapper("show_preferences")),
-            MenuItem(_("Show Console"), get_wrapper("show_console")),
-            MenuItem(_("Application Menu"), get_wrapper("open_player_menu")),
-            MenuItem(_("Open Config Folder"), get_wrapper("open_config_brs")),
-            MenuItem(_("Quit"), die),
-        ]
-'@,
-@'
-        menu_items = [
-            MenuItem(_("Configure Servers"), configure_servers),
-            MenuItem(_("Show Console"), get_wrapper("show_console")),
-            MenuItem(_("Open Config Folder"), get_wrapper("open_config_brs")),
-            MenuItem(_("Quit"), die),
-        ]
-'@
-    )
-    $replacement = @'
-        menu_items = [
-            MenuItem(_("Configure Servers"), get_wrapper("show_preferences")),
-            MenuItem(_("Show Console"), get_wrapper("show_console")),
-            MenuItem(_("Application Menu"), get_wrapper("open_player_menu")),
-            MenuItem(_("Open Config Folder"), get_wrapper("open_config_brs")),
-            MenuItem(_("Quit"), die),
-        ]
-'@
-    foreach ($p in $patterns) {
-        $patched = $patched.Replace($p, $replacement)
+    $content = Get-Content -Raw -LiteralPath $options
+    $patched = $content
+    if ($patched -notmatch '(?m)^import os$') {
+        $patched = $patched.Replace("import logging`r`nimport platform", "import logging`r`nimport os`r`nimport platform")
+        $patched = $patched.Replace("import logging`nimport platform", "import logging`nimport os`nimport platform")
     }
     $patched = $patched.Replace(
 @'
-            MenuItem(_("Show Console"), get_wrapper("show_console")),
-            MenuItem(_("Open Config Folder"), get_wrapper("open_config_brs")),
+    mpv_location = settings.mpv_ext_path
+    if (
 '@,
 @'
-            MenuItem(_("Show Console"), get_wrapper("show_console")),
-            MenuItem(_("Application Menu"), get_wrapper("open_player_menu")),
-            MenuItem(_("Open Config Folder"), get_wrapper("open_config_brs")),
-'@
-    )
-    $patched = $patched.Replace(
-@'
-    def show_console(self):
+    mpv_location = settings.mpv_ext_path
+    if mpv_location and not os.path.isabs(mpv_location):
         portable_dir = os.path.dirname(os.path.dirname(sys.executable))
-        log_dir = os.path.join(portable_dir, "config", "logs")
-        log_path = os.path.join(log_dir, "shim_stdout_" + time.strftime("%Y-%m-%d") + ".log")
-        if os.path.exists(log_path):
-            subprocess.Popen(["notepad.exe", log_path])
-        elif os.path.exists(log_dir):
-            subprocess.Popen(["explorer.exe", log_dir])
-        else:
-            log.warning("Portable log path does not exist: %s", log_dir)
+        candidate = os.path.join(portable_dir, mpv_location)
+        if os.path.exists(candidate):
+            mpv_location = candidate
+    if (
+'@
+    )
+    $patched = $patched.Replace(
+@'
+        mpv_options["config"] = True
+        mpv_options["config_dir"] = conffile.confdir(APP_NAME)
+'@,
+@'
+        mpv_options["config"] = True
+        mpv_options["config_dir"] = os.environ.get("MPV_HOME") or conffile.confdir(APP_NAME)
+'@
+    )
 
-    def show_preferences(self):
-        portable_dir = os.path.dirname(os.path.dirname(sys.executable))
-        python_exe = sys.executable
-        config_dir = os.path.join(portable_dir, "config", "jellyfin-mpv-shim")
-        code = (
-            "import sys;"
-            "from jellyfin_mpv_shim import conffile, i18n;"
-            "from jellyfin_mpv_shim.conf import settings;"
-            "from jellyfin_mpv_shim.constants import APP_NAME;"
-            "from jellyfin_mpv_shim.log_utils import configure_log;"
-            "from jellyfin_mpv_shim.clients import clientManager;"
-            "settings.load(conffile.get(APP_NAME, 'conf.json'));"
-            "i18n.configure();"
-            "configure_log(sys.stdout, settings.mpv_log_level);"
-            "clientManager.cli_connect()"
-        )
-        args = [python_exe, "-c", code, "--config", config_dir, "add"]
-        subprocess.Popen(args, cwd=portable_dir, creationflags=subprocess.CREATE_NEW_CONSOLE)
-'@,
-@'
-    def show_console(self):
-        if self.log_window is None or self.log_window.dead:
-            self.log_window = LoggerWindow()
-            self.log_window.start()
-
-    def show_preferences(self):
-        if self.preferences_window is None or self.preferences_window.dead:
-            self.preferences_window = PreferencesWindow()
-            self.preferences_window.start()
-'@
-    )
-    $patched = $patched.Replace(
-@'
-import threading
-import sys
-import logging
-import queue
-'@,
-@'
-import threading
-import sys
-import logging
-import queue
-import os
-import time
-'@
-    )
-    $patched = $patched.Replace(
-        'os.path.dirname(os.path.dirname(os.path.dirname(sys.executable)))',
-        'os.path.dirname(os.path.dirname(sys.executable))'
-    )
-    $patched = [Regex]::Replace($patched, "(import os\r?\nimport time\r?\n){2,}", "import os`r`nimport time`r`n")
-    $patched = $patched.Replace(
-@'
-        if not is_logged_in:
-            log.warning("No Jellyfin server is connected. Use the tray menu Configure Servers to add one.")
-'@,
-@'
-        if not is_logged_in:
-            self.show_preferences()
-            self.preferences_window.block_until_close()
-'@
-    )
+    if ($patched -notmatch '(?m)^import os$' -or
+        $patched -notmatch 'portable_dir = os\.path\.dirname\(os\.path\.dirname\(sys\.executable\)\)' -or
+        $patched -notmatch 'os\.environ\.get\("MPV_HOME"\)') {
+        throw "jellyfin-mpv-shim $ShimVersion portable path patch did not match upstream mpv_options.py"
+    }
     if ($patched -ne $content) {
-        Set-Content -LiteralPath $gui -Value $patched -Encoding UTF8
+        Set-Content -LiteralPath $options -Value $patched -Encoding UTF8
     }
 }
 
-function Update-ShimPlayerForPortable {
-    $player = Join-Path $PythonDir "Lib\site-packages\jellyfin_mpv_shim\player.py"
-    if (-not (Test-Path $player)) {
-        return
+function Update-ShimPortableFonts {
+    $pilfont = Join-Path $PythonDir "Lib\site-packages\jellyfin_mpv_shim\mpvtk\pilfont.py"
+    if (-not (Test-Path $pilfont)) {
+        throw "jellyfin-mpv-shim $ShimVersion pilfont.py is missing: $pilfont"
     }
-    Write-Step "Patching shim mpv path/config_dir for portable layout"
+    Write-Step "Patching shim 3 CJK font preference"
     if ($DryRun) {
-        Write-Host "DRY-RUN: patch mpv config_dir in $player"
+        Write-Host "DRY-RUN: patch portable font path in $pilfont"
         return
     }
-    $content = Get-Content -Raw -LiteralPath $player
-    $patched = $content.Replace(
-@'
-        mpv_location = settings.mpv_ext_path
-        if (
-'@,
-@'
-        mpv_location = settings.mpv_ext_path
-        if mpv_location and not os.path.isabs(mpv_location):
-            portable_dir = os.path.dirname(os.path.dirname(sys.executable))
-            candidate = os.path.join(portable_dir, mpv_location)
-            if os.path.exists(candidate):
-                mpv_location = candidate
-        if (
-'@
-    )
+
+    $content = Get-Content -Raw -LiteralPath $pilfont
+    $patched = $content
+    # Remove a preference written by an earlier run so changing the locale is reversible.
+    $patched = [Regex]::Replace($patched, '(?m)^\s+"msyh(?:bd)?\.ttc",\r?\n', '')
     $patched = $patched.Replace(
-@'
-            mpv_options["config"] = True
-            mpv_options["config_dir"] = conffile.confdir(APP_NAME)
-'@,
-@'
-            mpv_options["config"] = True
-            mpv_options["config_dir"] = os.environ.get("MPV_HOME") or conffile.confdir(APP_NAME)
-'@
+        'os.path.join(_PORTABLE_FONT_DIR, "NotoSansSC-VF.ttf")',
+        'os.path.join(_PORTABLE_FONT_DIR, "NotoSansCJK-VF.ttf")'
     )
-    if ($patched -notmatch 'mpv_options\["log_file"\]') {
+    if ($patched -notmatch '(?m)^import sys$') {
+        $patched = $patched.Replace("import os`r`n", "import os`r`nimport sys`r`n")
+        $patched = $patched.Replace("import os`n", "import os`nimport sys`n")
+    }
+    if ($patched -notmatch '(?m)^_PORTABLE_FONT_DIR = ') {
         $patched = $patched.Replace(
-@'
-            mpv_options["config"] = True
-            mpv_options["config_dir"] = os.environ.get("MPV_HOME") or conffile.confdir(APP_NAME)
-'@,
-@'
-            mpv_options["config"] = True
-            mpv_options["config_dir"] = os.environ.get("MPV_HOME") or conffile.confdir(APP_NAME)
-            log_dir = os.path.join(os.path.dirname(mpv_options["config_dir"]), "logs")
-            try:
-                os.makedirs(log_dir, exist_ok=True)
-                mpv_options["log_file"] = os.path.join(log_dir, "mpv.log")
-            except Exception:
-                log.debug("Could not configure mpv log file", exc_info=True)
-'@
+            'log = logging.getLogger("mpvtk.pilfont")',
+            'log = logging.getLogger("mpvtk.pilfont")' + "`r`n`r`n" +
+            '_PORTABLE_FONT_DIR = os.path.join(' + "`r`n" +
+            '    os.path.dirname(os.path.dirname(sys.executable)), "fonts")'
         )
     }
-    $patched = $patched.Replace(
-@'
-_mpv_errors = (BrokenPipeError,)
-if hasattr(mpv, "ShutdownError"):
-    _mpv_errors = (BrokenPipeError, mpv.ShutdownError)
-'@,
-@'
-_mpv_errors = (BrokenPipeError, TimeoutError)
-if hasattr(mpv, "ShutdownError"):
-    _mpv_errors = _mpv_errors + (mpv.ShutdownError,)
-if hasattr(mpv, "MPVError"):
-    _mpv_errors = _mpv_errors + (mpv.MPVError,)
-'@
-    )
-    $patched = $patched.Replace(
-@'
-_mpv_errors = (BrokenPipeError, TimeoutError)
-if hasattr(mpv, "ShutdownError"):
-    _mpv_errors = (BrokenPipeError, mpv.ShutdownError)
-'@,
-@'
-_mpv_errors = (BrokenPipeError, TimeoutError)
-if hasattr(mpv, "ShutdownError"):
-    _mpv_errors = _mpv_errors + (mpv.ShutdownError,)
-if hasattr(mpv, "MPVError"):
-    _mpv_errors = _mpv_errors + (mpv.MPVError,)
-'@
-    )
-    $patched = $patched.Replace(
-@'
-    def stop_and_close(self):
-        log.info("stop_and_close: stopping playback")
-        self.stop()
-        if not self._mpv_alive:
-            return
-'@,
-@'
-    def stop_and_close(self):
-        log.info("stop_and_close: stopping playback")
-        try:
-            self.stop()
-        except _mpv_errors:
-            self._handle_mpv_disconnect()
-            return
-        if not self._mpv_alive:
-            return
-'@
-    )
-    if ($patched -notmatch 'self\._player\.window_minimized = False') {
+    if ($patched -notmatch 'os\.path\.join\(_PORTABLE_FONT_DIR, "NotoSansCJK-VF\.ttf"\)') {
         $patched = $patched.Replace(
-@'
-        self._player.play(self.url)
-'@,
-@'
-        try:
-            self._player.force_window = True
-            self._player.keep_open = True
-            self._player.window_minimized = False
-        except _mpv_errors:
-            self._handle_mpv_disconnect()
-            return
-        self._player.play(self.url)
-'@
+            '    "cjk": [' + "`r`n" + '        "NotoSansCJK-Regular.ttc",',
+            '    "cjk": [' + "`r`n" +
+            '        os.path.join(_PORTABLE_FONT_DIR, "NotoSansCJK-VF.ttf"),' + "`r`n" +
+            '        "NotoSansCJK-Regular.ttc",'
+        )
+        $patched = $patched.Replace(
+            '    "cjk": [' + "`n" + '        "NotoSansCJK-Regular.ttc",',
+            '    "cjk": [' + "`n" +
+            '        os.path.join(_PORTABLE_FONT_DIR, "NotoSansCJK-VF.ttf"),' + "`n" +
+            '        "NotoSansCJK-Regular.ttc",'
         )
     }
-    $patched = $patched.Replace(
-@'
-        self._mpv_alive = False
-
-    def _terminate_mpv(self):
-'@,
-@'
-        self._mpv_alive = False
-        if is_using_ext_mpv and self._player:
-            try:
-                self._player.terminate(join=False)
-            except Exception:
-                log.debug("Error terminating disconnected mpv", exc_info=True)
-
-    def _terminate_mpv(self):
-'@
-    )
-    if ($patched -notmatch 'PlayerManager::finished_callback starting next episode: current seq=') {
+    if ($patched -notmatch '(?s)_BOLD = \{.*?"cjk": \[os\.path\.join\(_PORTABLE_FONT_DIR, "NotoSansCJK-VF\.ttf"\)') {
         $patched = $patched.Replace(
-@'
-        if not url:
-            log.error("PlayerManager::play no URL found")
-            return
+            '    "cjk": ["NotoSansCJK-Bold.ttc",',
+            '    "cjk": [os.path.join(_PORTABLE_FONT_DIR, "NotoSansCJK-VF.ttf"),' + "`r`n" +
+            '            "NotoSansCJK-Bold.ttc",'
+        )
+    }
 
-        self._play_media(video, url, offset, no_initial_timeline, is_initial_play)
-'@,
-@'
-        if not url:
-            log.error("PlayerManager::play no URL found")
-            return False
+    if ($CjkFontLanguage -eq "sc") {
+        $patched = [Regex]::Replace(
+            $patched,
+            '("cjk": \[\r?\n)(\s+os\.path\.join\(_PORTABLE_FONT_DIR, "NotoSansCJK-VF\.ttf"\),)',
+            '$1        "msyh.ttc",' + "`r`n" + '$2',
+            1
+        )
+        $patched = [Regex]::Replace(
+            $patched,
+            '(?s)(_BOLD = \{.*?"cjk": \[)(os\.path\.join\(_PORTABLE_FONT_DIR, "NotoSansCJK-VF\.ttf"\),)',
+            '$1"msyhbd.ttc",' + "`r`n" + '            "msyh.ttc",' + "`r`n" + '            $2',
+            1
+        )
+    }
 
-        return self._play_media(video, url, offset, no_initial_timeline, is_initial_play)
-'@
-        )
-        $patched = $patched.Replace(
-@'
-        except _mpv_errors:
-            self._handle_mpv_disconnect()
-            return
-        self._player.play(self.url)
-'@,
-@'
-        except _mpv_errors:
-            self._handle_mpv_disconnect()
-            return False
-        self._video = video
-        self._player.play(self.url)
-'@
-        )
-        $patched = $patched.Replace(
-@'
-            # Timeout playback attempt after 10 seconds
-            log.error("Timeout when waiting for media duration. Stopping playback!")
-            self.stop()
-            return
-'@,
-@'
-            log.error(
-                "Timeout when waiting for media duration for item %s (%s). Stopping playback!",
-                getattr(video, "item_id", "unknown"),
-                video.get_proper_title(),
-            )
-            self.stop()
-            return False
-'@
-        )
-        $patched = $patched.Replace(
-@'
-                5000,
-                1,
-            )
-
-    @staticmethod
-'@,
-@'
-                5000,
-                1,
-            )
-        return True
-
-    @staticmethod
-'@
-        )
-        $patched = $patched.Replace(
-@'
-            if has_lock:
-                log.info("PlayerManager::finished_callback starting next episode")
-                new_video = self._video.parent.get_next().video
-                self.send_timeline_stopped(True)
-                if self.syncplay.is_enabled():
-                    self.syncplay.request_next(self._video.get_playlist_id())
-                else:
-                    self.play(new_video)
-'@,
-@'
-            if has_lock:
-                old_video = self._video
-                old_parent = old_video.parent
-                next_media = old_parent.get_next()
-                new_video = next_media.video
-                log.info(
-                    "PlayerManager::finished_callback starting next episode: current seq=%s/%s item=%s title=%r; next seq=%s/%s item=%s title=%r",
-                    old_parent.seq + 1,
-                    len(old_parent.queue),
-                    old_video.item_id,
-                    old_video.get_proper_title(),
-                    next_media.seq + 1,
-                    len(next_media.queue),
-                    new_video.item_id,
-                    new_video.get_proper_title(),
-                )
-                self.send_timeline_stopped(True)
-                if self.syncplay.is_enabled():
-                    self.syncplay.request_next(old_video.get_playlist_id())
-                else:
-                    if not self.play(new_video):
-                        log.error(
-                            "PlayerManager::finished_callback failed to start next episode item=%s title=%r",
-                            new_video.item_id,
-                            new_video.get_proper_title(),
-                        )
-'@
-        )
-        $patched = $patched.Replace(
-@'
-        if self._video.parent.has_next:
-            new_video = self._video.parent.get_next().video
-            self.send_timeline_stopped(True)
-            if self.syncplay.is_enabled():
-                self.syncplay.request_next(self._video.get_playlist_id())
-            else:
-                self.play(new_video)
-            return True
-'@,
-@'
-        if self._video.parent.has_next:
-            old_video = self._video
-            old_parent = old_video.parent
-            next_media = old_parent.get_next()
-            new_video = next_media.video
-            log.info(
-                "PlayerManager::play_next: current seq=%s/%s item=%s title=%r; next seq=%s/%s item=%s title=%r",
-                old_parent.seq + 1,
-                len(old_parent.queue),
-                old_video.item_id,
-                old_video.get_proper_title(),
-                next_media.seq + 1,
-                len(next_media.queue),
-                new_video.item_id,
-                new_video.get_proper_title(),
-            )
-            self.send_timeline_stopped(True)
-            if self.syncplay.is_enabled():
-                self.syncplay.request_next(old_video.get_playlist_id())
-            else:
-                return self.play(new_video)
-            return True
-'@
-        )
+    if ($patched -notmatch '(?m)^import sys$' -or
+        $patched -notmatch '(?m)^_PORTABLE_FONT_DIR = ' -or
+        $patched -notmatch 'os\.path\.join\(_PORTABLE_FONT_DIR, "NotoSansCJK-VF\.ttf"\)' -or
+        ($CjkFontLanguage -eq "sc" -and $patched -notmatch '"msyh\.ttc"') -or
+        ($CjkFontLanguage -ne "sc" -and $patched -match '"msyh(?:bd)?\.ttc"')) {
+        throw "jellyfin-mpv-shim $ShimVersion portable CJK font patch did not match upstream pilfont.py"
     }
     if ($patched -ne $content) {
-        Set-Content -LiteralPath $player -Value $patched -Encoding UTF8
-    }
-}
-
-function Update-ShimActionThreadForRobustness {
-    $actionThread = Join-Path $PythonDir "Lib\site-packages\jellyfin_mpv_shim\action_thread.py"
-    if (-not (Test-Path $actionThread)) {
-        return
-    }
-    Write-Step "Patching shim action thread to survive mpv IPC timeouts"
-    if ($DryRun) {
-        Write-Host "DRY-RUN: patch action thread in $actionThread"
-        return
-    }
-    $content = Get-Content -Raw -LiteralPath $actionThread
-    $patched = $content.Replace(
-@'
-import threading
-
-from .player import playerManager
-'@,
-@'
-import threading
-import logging
-
-from .player import playerManager
-
-log = logging.getLogger("action_thread")
-'@
-    )
-    $patched = $patched.Replace(
-@'
-            if playerManager.is_active() or force_next:
-                playerManager.update()
-'@,
-@'
-            try:
-                if playerManager.is_active() or force_next:
-                    playerManager.update()
-            except Exception:
-                log.exception("ActionThread update failed; keeping action thread alive.")
-'@
-    )
-    if ($patched -ne $content) {
-        Set-Content -LiteralPath $actionThread -Value $patched -Encoding UTF8
-    }
-}
-
-function Update-ShimNetworkRecovery {
-    $clients = Join-Path $PythonDir "Lib\site-packages\jellyfin_mpv_shim\clients.py"
-    $keepalive = Join-Path $PythonDir "Lib\site-packages\jellyfin_apiclient_python\keepalive.py"
-    $wsClient = Join-Path $PythonDir "Lib\site-packages\jellyfin_apiclient_python\ws_client.py"
-    if (-not (Test-Path $clients) -or -not (Test-Path $keepalive) -or -not (Test-Path $wsClient)) {
-        return
-    }
-    Write-Step "Patching shim network recovery for transient proxy failures"
-    if ($DryRun) {
-        Write-Host "DRY-RUN: patch shim and Jellyfin API client network recovery"
-        return
-    }
-
-    $content = Get-Content -Raw -LiteralPath $clients
-    $patched = $content.Replace(
-@'
-                # WebSocketDisconnect doesn't always happen here.
-                client.callback = lambda *_: None
-                client.callback_ws = lambda *_: None
-                client.stop()
-                client.callback("WebSocketDisconnect", None)
-'@,
-@'
-                # Preserve the event callback before silencing callbacks emitted
-                # by stop(); then synthesize the disconnect that starts reconnect.
-                disconnect_callback = client.callback
-                client.callback = lambda *_: None
-                client.callback_ws = lambda *_: None
-                client.stop()
-                disconnect_callback("WebSocketDisconnect", None)
-'@
-    )
-    $patched = $patched.Replace(
-@'
-                try:
-                    client.jellyfin.post_capabilities(CAPABILITIES)
-                except Exception:
-                    log.warning(
-                        "Failed to post capabilities on reconnect", exc_info=True
-                    )
-'@,
-@'
-                # The websocket can become ready before the HTTP API behind a
-                # reverse proxy. Retry capability registration for 10 seconds.
-                for attempt in range(6):
-                    if self.is_stopping:
-                        break
-                    try:
-                        client.jellyfin.post_capabilities(CAPABILITIES)
-                        break
-                    except Exception:
-                        if attempt == 5:
-                            log.warning(
-                                "Failed to post capabilities on connect", exc_info=True
-                            )
-                        else:
-                            time.sleep(2)
-'@
-    )
-    if ($patched -ne $content) {
-        Set-Content -LiteralPath $clients -Value $patched -Encoding UTF8
-    }
-
-    $content = Get-Content -Raw -LiteralPath $keepalive
-    $patched = $content.Replace(
-@'
-            else:
-                self.ws.send("KeepAlive")
-'@,
-@'
-            else:
-                try:
-                    self.ws.send("KeepAlive")
-                except Exception:
-                    # The websocket reconnect loop owns recovery. A keepalive
-                    # racing with socket shutdown should simply stop.
-                    break
-'@
-    )
-    if ($patched -ne $content) {
-        Set-Content -LiteralPath $keepalive -Value $patched -Encoding UTF8
-    }
-
-    $content = Get-Content -Raw -LiteralPath $wsClient
-    $patched = $content.Replace("import threading`r`nimport ssl", "import threading`r`nimport time`r`nimport ssl")
-    $patched = $patched.Replace("import threading`nimport ssl", "import threading`nimport time`nimport ssl")
-    if ($patched -notmatch 'LOG\.warning\("Websocket disconnected, reconnecting\.\.\."\)\r?\n\s+time\.sleep\(2\)') {
-        $patched = $patched.Replace(
-@'
-            LOG.warning("Websocket disconnected, reconnecting...")
-'@,
-@'
-            LOG.warning("Websocket disconnected, reconnecting...")
-            time.sleep(2)
-'@
-        )
-    }
-    if ($patched -ne $content) {
-        Set-Content -LiteralPath $wsClient -Value $patched -Encoding UTF8
-    }
-}
-
-function Update-MpvJsonIpcForWindowsPipe {
-    $ipc = Join-Path $PythonDir "Lib\site-packages\python_mpv_jsonipc.py"
-    if (-not (Test-Path $ipc)) {
-        return
-    }
-    Write-Step "Patching python_mpv_jsonipc Windows pipe handling"
-    if ($DryRun) {
-        Write-Host "DRY-RUN: patch Windows pipe handling in $ipc"
-        return
-    }
-    $content = Get-Content -Raw -LiteralPath $ipc
-    $patched = $content.Replace(
-        '        limit = 5 # Connection may fail at first. Try 5 times.',
-        '        limit = 30 # Connection may fail while mpv initializes filters/scripts.'
-    )
-    $patched = $patched.Replace(
-@'
-        if os.name == 'nt':
-            ipc_socket = "\\\\.\\pipe\\" + ipc_socket
-'@,
-@'
-        if os.name == 'nt':
-            ipc_socket = "\\\\.\\pipe\\" + ipc_socket
-            ipc_socket_name = ipc_socket
-'@
-    )
-    $patched = $patched.Replace(
-@'
-        ipc_exists = False
-        for _ in range(100): # Give MPV 10 seconds to start.
-            time.sleep(0.1)
-            self.process.poll()
-            if os.path.exists(ipc_socket):
-                ipc_exists = True
-                log.debug("Found MPV socket.")
-                break
-            if self.process.returncode is not None:
-                log.error("MPV failed with returncode {0}.".format(self.process.returncode))
-                break
-        else:
-            self.process.terminate()
-            raise MPVError("MPV start timed out.")
-'@,
-@'
-        ipc_exists = False
-        for attempt in range(100): # Give MPV 10 seconds to start.
-            time.sleep(0.1)
-            self.process.poll()
-            if os.name == 'nt':
-                # Python's os.path.exists() is unreliable for Windows named pipes.
-                # Once mpv has stayed alive briefly, let WindowsSocket do the real
-                # connection retry against the pipe.
-                if attempt >= 5:
-                    ipc_exists = True
-                    log.debug("MPV process is alive; deferring Windows pipe connection to MPVInter.")
-                    break
-            elif os.path.exists(ipc_socket):
-                ipc_exists = True
-                log.debug("Found MPV socket.")
-                break
-            if self.process.returncode is not None:
-                log.error("MPV failed with returncode {0}.".format(self.process.returncode))
-                break
-        else:
-            self.process.terminate()
-            raise MPVError("MPV start timed out.")
-'@
-    )
-    if ($patched -ne $content) {
-        Set-Content -LiteralPath $ipc -Value $patched -Encoding UTF8
+        Set-Content -LiteralPath $pilfont -Value $patched -Encoding UTF8
     }
 }
 
@@ -2174,6 +1630,9 @@ function Update-ShimConfig {
     }
     & $setJson $json "mpv_ext" $true
     & $setJson $json "enable_gui" $true
+    if (-not ($json.PSObject.Properties.Name -contains "start_minimized")) {
+        & $setJson $json "start_minimized" $true
+    }
     & $setJson $json "mpv_ext_no_ovr" $false
     & $setJson $json "mpv_ext_path" "mpv\mpv.exe"
     & $setJson $json "mpv_ext_ipc" $null
@@ -2296,6 +1755,41 @@ function Cleanup-ObsoleteConfig {
     if ($runtimeUpdates.Count -gt 0) {
         Write-Step "Migrating obsolete RIFE 4.6 runtime profiles to 4.26"
         Set-RuntimeConfigValues $runtimeUpdates
+    }
+
+    $trtCacheDir = Join-Path $CacheDir "rife-trt"
+    $removedStaleEngines = $false
+    if (Test-Path $trtCacheDir) {
+        foreach ($file in Get-ChildItem -LiteralPath $trtCacheDir -File -Force) {
+            $match = [Regex]::Match($file.Name, '_trt-(?<version>[^_]+)\.ts(?:\.encode)?$')
+            if ($match.Success -and $match.Groups["version"].Value -ne $TensorRtVersion) {
+                if ($DryRun) {
+                    Write-Host "DRY-RUN: remove stale TensorRT cache $($file.FullName)"
+                } else {
+                    Remove-Item -LiteralPath $file.FullName -Force
+                }
+                $removedStaleEngines = $true
+            }
+        }
+
+        foreach ($log in Get-ChildItem -LiteralPath $trtCacheDir -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '\.build(?:\.err)?\.log$' }) {
+            if (-not $DryRun) {
+                Remove-Item -LiteralPath $log.FullName -Force
+            }
+        }
+
+        if ($removedStaleEngines) {
+            Write-Step "Removed TensorRT engine caches from versions older than $TensorRtVersion"
+            $validationDir = Join-Path $trtCacheDir ".validated"
+            if (Test-Path $validationDir) {
+                if ($DryRun) {
+                    Write-Host "DRY-RUN: remove stale TensorRT validation markers $validationDir"
+                } else {
+                    Remove-Item -LiteralPath $validationDir -Recurse -Force
+                }
+            }
+        }
     }
 }
 
@@ -3372,10 +2866,10 @@ function Install-All {
     Test-NvidiaVideoSuperResolution
     Configure-RifeTensorRtForGpu
     Install-Python
-    Install-Tkinter
     Install-Mpv
     Install-Ffmpeg
     Install-PythonPackages
+    Install-ShimFonts
     Install-KrigChromaExtension
     Update-VsrifeTensorRtPrecision
     Ensure-RifeModels
@@ -3383,16 +2877,13 @@ function Install-All {
     Sync-VcRuntimeDlls
     Remove-StaleMpvVapourSynthDlls
     Configure-VapourSynthPython
+    Cleanup-ObsoleteConfig
     Precompile-RifeTensorRtEngines
     Measure-RifeRuntimeCapability
-    Update-ShimGuiForPortable
-    Update-ShimPlayerForPortable
-    Update-ShimActionThreadForRobustness
-    Update-ShimNetworkRecovery
-    Update-MpvJsonIpcForWindowsPipe
+    Update-ShimPortablePaths
+    Update-ShimPortableFonts
     Update-ShimConfig
     Remove-LegacyShimMpvCopies
-    Cleanup-ObsoleteConfig
     Write-LauncherScripts
     Create-RootLaunchers
     if (-not $KeepDownloads) {
@@ -3413,6 +2904,7 @@ function Show-Status {
     $items = @(
         (Join-Path $PortableDir "mpv\mpv.exe"),
         (Join-Path $PortableDir "python\python.exe"),
+        (Join-Path $FontsDir "NotoSansCJK-VF.ttf"),
         (Join-Path $ConfigDir "mpv\mpv.conf"),
         (Join-Path $ConfigDir "jellyfin-mpv-shim\conf.json"),
         $mpvRootItem,
@@ -3437,6 +2929,7 @@ function Uninstall-Portable {
             (Join-Path $PortableDir "mpv"),
             (Join-Path $PortableDir "python"),
             (Join-Path $PortableDir "tools"),
+            (Join-Path $PortableDir "fonts"),
             (Join-Path $PortableDir "scripts"),
             (Join-Path $PortableDir "_downloads"),
             (Join-Path $PortableDir "_mpv_extract"),

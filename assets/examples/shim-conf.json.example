@@ -7,6 +7,7 @@
   "playback_timeout": 60,
   "health_check_interval": 30,
   "enable_gui": true,
+  "start_minimized": true,
   "enable_osc": true,
   "media_ended_cmd": null,
   "pre_media_cmd": null,

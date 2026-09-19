@@ -33,6 +33,9 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 # Full install or update
 .\install.ps1 install
 
+# Prefer a CJK glyph locale for the portable UI font (sc is the default)
+.\install.ps1 install -CjkFontLanguage jp
+
 # Faster install; uncached RIFE profiles will build in a low-priority background process on first use
 .\install.ps1 install -SkipRifeTrtPrecompile
 
@@ -77,6 +80,12 @@ Generated launchers:
 | `jellyfin-mpv-shim-portable/scripts/unregister-mpv-file-association.bat` | Remove that current-user Open With registration |
 
 The portable root keeps only double-click entry points; maintenance scripts live under `jellyfin-mpv-shim-portable/scripts/`. The installer prefers generating Start/taskbar-pinnable `.exe` launchers with the system .NET C# compiler; if the target machine has no compiler, it automatically falls back to `.bat` launchers. Windows 10/11 protects default-app selection, so the installer does not silently take over video file associations. To make this portable MPV the default player, run `scripts/register-mpv-file-association.bat`, then choose `MPV Portable` in Settings > Apps > Default apps, or right-click a video file and use Open with > Choose another app.
+
+The installer currently pins Jellyfin MPV Shim 3.0.0, Jellyfin API Client 1.18.0, python-mpv-jsonipc 1.4.0, VapourSynth R80, PyTorch 2.12.1 CUDA 13.0, Torch-TensorRT 2.12.1, TensorRT 10.16.1.11, and vsrife 5.7.0. Torch-TensorRT 2.13 is intentionally not used yet: vsrife 5.7 still relies on the 2.12 mixed-precision compiler interface, while 2.13 removes those arguments and would silently ignore this project's overflow-protection policy.
+
+Shim 3 replaces the old Tk configuration windows with an mpv-rendered library browser and settings UI. `start-shim` starts it minimized to the tray by default; use **Show Library Browser** or **Configure Servers** from the tray icon to open the interface. Existing `cred.json` server credentials are retained during upgrades.
+
+The generated portable includes a locale-specific Noto Sans CJK font for Shim 3's Pillow-rendered library titles and captions. `-CjkFontLanguage sc|tc|hk|jp|kr` selects Simplified Chinese, Traditional Chinese, Hong Kong Chinese, Japanese, or Korean glyph preferences; `sc` is the default. In `sc` mode, Shim prefers the Windows Microsoft YaHei regular/bold fonts for clearer Chinese UI text and falls back to the bundled Noto Sans SC font. Other modes prefer their selected portable Noto font. Rerunning the installer with a different value replaces the generated fallback font and updates the preference. The bundled font is distributed under the SIL Open Font License, included beside the font file.
 
 ## Default Playback Pipeline
 
@@ -182,9 +191,10 @@ Generated portable layout:
 
 | Path | Purpose |
 |---|---|
-| `python/` | portable CPython, pip packages, Tk, VapourSynth, Torch, TensorRT, RIFE |
+| `python/` | portable CPython, pip packages, VapourSynth, Torch, TensorRT, RIFE, Jellyfin MPV Shim |
 | `mpv/` | portable mpv |
 | `tools/` | ffmpeg / ffprobe |
+| `fonts/` | locale-selected portable Noto Sans CJK UI font, language marker, and OFL license |
 | `config/mpv/` | mpv config, runtime.conf, RIFE vpy files, autorife/autovsr, danmaku script |
 | `config/jellyfin-mpv-shim/` | shim config and server credentials |
 | `config/logs/` | shim and mpv logs |
