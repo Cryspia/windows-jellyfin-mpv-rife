@@ -45,7 +45,8 @@ $PythonZipUrl = "https://www.python.org/ftp/python/$PythonVersion/python-$Python
 $GetPipUrl = "https://bootstrap.pypa.io/get-pip.py"
 $SevenZipUrl = "https://www.7-zip.org/a/7zr.exe"
 $FfmpegZipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-$DanmakuZipUrl = "https://github.com/Cryspia/mpv-dandanplay-danmaku/archive/refs/heads/main.zip"
+$DanmakuRef = "9968911091b1715e28ced983431b3ce88e04a676"
+$DanmakuZipUrl = "https://github.com/Cryspia/mpv-dandanplay-danmaku/archive/$DanmakuRef.zip"
 $GoogleFontsRawBase = "https://raw.githubusercontent.com/google/fonts/main/ofl"
 $PyTorchCudaIndex = "https://download.pytorch.org/whl/test/cu130"
 $NvidiaPipIndex = "https://pypi.nvidia.com"
@@ -912,7 +913,7 @@ for name, url in models.items():
 function Install-Danmaku {
     $target = Join-Path $MpvConfigDir "scripts\dandanplay"
     Write-Step "Syncing mpv dandanplay danmaku script from upstream"
-    $zip = Join-Path $DownloadsDir "mpv-dandanplay-danmaku-main.zip"
+    $zip = Join-Path $DownloadsDir ("mpv-dandanplay-danmaku-{0}.zip" -f $DanmakuRef.Substring(0, 12))
     if ($SkipDownloads -and (Test-Path (Join-Path $target "main.lua")) -and -not (Test-Path $zip)) {
         Write-Step "Danmaku script already exists; -SkipDownloads set and no cached upstream zip found"
         return

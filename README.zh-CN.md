@@ -147,7 +147,7 @@ d3d11vpp=scale=...:scaling-mode=nvidia
 
 ## 弹幕
 
-弹幕由 [Cryspia/mpv-dandanplay-danmaku](https://github.com/Cryspia/mpv-dandanplay-danmaku) 提供。安装器每次正常联网安装都会同步该项目 `main` 分支的脚本到：
+弹幕由 [Cryspia/mpv-dandanplay-danmaku](https://github.com/Cryspia/mpv-dandanplay-danmaku) 提供。安装器会固定并安装经过验证的上游版本到：
 
 ```text
 jellyfin-mpv-shim-portable/config/mpv/scripts/dandanplay/
@@ -210,6 +210,7 @@ portable 目录由安装器生成，不应把需要持久维护的依赖手工�
 
 - `install.ps1 install` 可重复运行，用于更新或修补 portable。
 - 默认安装结束会清理 `_downloads` 和临时解压目录；调试安装问题时可使用 `-KeepDownloads`。
-- 如果上游弹幕脚本更新，重新运行 `install.ps1 install` 即可同步。
+- 更新本项目后重新运行 `install.ps1 install`，即可安装本项目最新验证过的弹幕版本。
+- 当前固定的弹幕版本包含 Shim 3 mpvtk 兼容修复：右侧弹幕图标仅在鼠标悬停时抢占强制左键绑定，因此按钮可以点击，同时不会阻断其他区域的 Shim HUD 操作。
 - 如果更新后插帧结果花屏，删除 `jellyfin-mpv-shim-portable/config/cache/rife-trt/` 并重新运行 `install.ps1 install`，让 TensorRT engine 用 patch 后的混合精度策略重新编译。
 

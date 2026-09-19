@@ -147,7 +147,7 @@ If the installer cannot confirm the registry state for NVIDIA VSR, it warns you 
 
 ## Danmaku
 
-Danmaku is provided by [Cryspia/mpv-dandanplay-danmaku](https://github.com/Cryspia/mpv-dandanplay-danmaku). Normal online installs sync that repository's `main` branch into:
+Danmaku is provided by [Cryspia/mpv-dandanplay-danmaku](https://github.com/Cryspia/mpv-dandanplay-danmaku). The installer pins a tested upstream revision and installs it into:
 
 ```text
 jellyfin-mpv-shim-portable/config/mpv/scripts/dandanplay/
@@ -210,6 +210,7 @@ The host must still provide the NVIDIA driver and enabled RTX Video Super Resolu
 
 - `install.ps1 install` is idempotent and can be rerun to update or patch the portable runtime.
 - Successful installs clean `_downloads` and temporary extraction directories by default. Use `-KeepDownloads` while debugging installer issues.
-- Rerun `install.ps1 install` to sync updates from the upstream danmaku script.
+- Update this project and rerun `install.ps1 install` to install its latest tested danmaku revision.
+- The pinned danmaku revision includes the Shim 3 mpvtk compatibility fix: the right-edge danmaku icon claims the forced left-click binding only while hovered, so it remains clickable without blocking the Shim HUD elsewhere.
 - If interpolated frames are corrupted after an update, delete `jellyfin-mpv-shim-portable/config/cache/rife-trt/` and rerun `install.ps1 install` so TensorRT engines rebuild with the patched mixed-precision policy.
 
