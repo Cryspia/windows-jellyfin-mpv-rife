@@ -953,6 +953,119 @@ function Install-Danmaku {
     }
 }
 
+function Update-DanmakuShim3Compatibility {
+    $main = Join-Path $MpvConfigDir "scripts\dandanplay\main.lua"
+    if (-not (Test-Path $main)) {
+        throw "Installed danmaku script is missing: $main"
+    }
+    Write-Step "Patching danmaku modal UI for Shim 3 mpvtk"
+    if ($DryRun) {
+        Write-Host "DRY-RUN: patch Shim 3 modal integration in $main"
+        return
+    }
+
+    $content = Get-Content -Raw -LiteralPath $main
+    $patched = $content
+    if ($patched -notmatch 'mpvtk-external-modal') {
+        $patched = $patched.Replace(
+@'
+local function modal_clear_bindings()
+'@,
+@'
+local function shim_external_modal(active)
+    mp.commandv("script-message", "mpvtk-external-modal",
+                active and "yes" or "no")
+end
+
+local function modal_input_get(opts)
+    shim_external_modal(true)
+    local user_closed = opts.closed
+    opts.closed = function(...)
+        shim_external_modal(false)
+        if user_closed then user_closed(...) end
+    end
+    local ok, err = pcall(input.get, opts)
+    if not ok then
+        shim_external_modal(false)
+        error(err)
+    end
+end
+
+local function modal_clear_bindings()
+'@
+        )
+        $patched = $patched.Replace(
+@'
+    modal.active = nil
+end
+
+-- ============================================================================
+-- Settings panel  (Shift+F10)
+'@,
+@'
+    modal.active = nil
+    shim_external_modal(false)
+end
+
+-- ============================================================================
+-- Settings panel  (Shift+F10)
+'@
+        )
+        $patched = $patched.Replace(
+@'
+panel_open = function()
+    modal_close()  -- close any other modal
+    modal.active = "panel"
+'@,
+@'
+panel_open = function()
+    modal_close()  -- close any other modal
+    shim_external_modal(true)
+    modal.active = "panel"
+'@
+        )
+        $patched = $patched.Replace(
+@'
+    if #items == 0 then
+        mp.osd_message("无结果", 1.5)
+        return
+    end
+
+    local cursor = 1
+'@,
+@'
+    if #items == 0 then
+        mp.osd_message("无结果", 1.5)
+        return
+    end
+    shim_external_modal(true)
+
+    local cursor = 1
+'@
+        )
+        $patched = $patched.Replace('            input.get({', '            modal_input_get({')
+        $patched = $patched.Replace('        input.get({', '        modal_input_get({')
+        $patched = $patched.Replace(
+            'mp.add_key_binding("Shift+F10", "danmaku-panel", panel_open)',
+            'mp.add_forced_key_binding("Shift+F10", "danmaku-panel", panel_open)'
+        )
+        $patched = $patched.Replace(
+            'mp.add_key_binding("Ctrl+F10", "danmaku-search", open_search_input)',
+            'mp.add_forced_key_binding("Ctrl+F10", "danmaku-search", open_search_input)'
+        )
+    }
+
+    if ($patched -notmatch 'local function modal_input_get\(opts\)' -or
+        $patched -notmatch 'shim_external_modal\(true\)' -or
+        $patched -notmatch 'mp\.add_forced_key_binding\("Shift\+F10"' -or
+        $patched -notmatch 'mp\.add_forced_key_binding\("Ctrl\+F10"') {
+        throw "Danmaku Shim 3 compatibility patch did not match pinned revision $DanmakuRef"
+    }
+    if ($patched -ne $content) {
+        Set-Content -LiteralPath $main -Value $patched -Encoding UTF8
+    }
+}
+
 function Update-ShimPortablePaths {
     $options = Join-Path $PythonDir "Lib\site-packages\jellyfin_mpv_shim\mpv_options.py"
     if (-not (Test-Path $options)) {
@@ -1083,6 +1196,74 @@ function Update-ShimPortableFonts {
     }
     if ($patched -ne $content) {
         Set-Content -LiteralPath $pilfont -Value $patched -Encoding UTF8
+    }
+}
+
+function Update-ShimExternalModalBridge {
+    $renderer = Join-Path $PythonDir "Lib\site-packages\jellyfin_mpv_shim\mpvtk\renderer.lua"
+    if (-not (Test-Path $renderer)) {
+        throw "jellyfin-mpv-shim $ShimVersion renderer.lua is missing: $renderer"
+    }
+    Write-Step "Patching Shim 3 external modal bridge"
+    if ($DryRun) {
+        Write-Host "DRY-RUN: patch external modal bridge in $renderer"
+        return
+    }
+
+    $content = Get-Content -Raw -LiteralPath $renderer
+    $patched = $content
+    if ($patched -notmatch "mpvtk-external-modal") {
+        $patched = [Regex]::Replace(
+            $patched,
+            '(?m)^(local function phud_skip_bind\(\)\r?\n)',
+            '$1    if state.external_modal then return end' + "`r`n",
+            1
+        )
+        $patched = [Regex]::Replace(
+            $patched,
+            '(?m)^(function phud_bind_summon\(\)\r?\n)',
+            '$1    if state.external_modal then return end' + "`r`n",
+            1
+        )
+        $patched = [Regex]::Replace(
+            $patched,
+            '(?m)^(function phud_summon\(src\)\r?\n)',
+            '$1    if state.external_modal then return end' + "`r`n",
+            1
+        )
+        $patched = $patched.Replace(
+@'
+-- What Select or a direction means while the bar is HIDDEN. One
+'@,
+@'
+-- Third-party ASS modals need the playback HUD's bitmap overlays and
+-- summon bindings out of the way. Keep HUD mode attached so closing the
+-- modal can restore its idle wake surface without reconstructing settings.
+mp.register_script_message('mpvtk-external-modal', function(on)
+    state.external_modal = (on == 'yes' or on == 'true' or on == '1')
+    if state.external_modal then
+        if state.phud.shown then phud_hide() end
+        phud_unbind_summon()
+        phud_skip_hide()
+    elseif state.phud.mode and not state.phud.shown then
+        phud_bind_summon()
+        phud_skip_bind()
+    end
+    request_render()
+end)
+
+-- What Select or a direction means while the bar is HIDDEN. One
+'@
+        )
+    }
+
+    if ($patched -notmatch "mp\.register_script_message\('mpvtk-external-modal'" -or
+        $patched -notmatch 'function phud_bind_summon\(\)\r?\n\s+if state\.external_modal' -or
+        $patched -notmatch 'function phud_summon\(src\)\r?\n\s+if state\.external_modal') {
+        throw "jellyfin-mpv-shim $ShimVersion external modal bridge patch did not match renderer.lua"
+    }
+    if ($patched -ne $content) {
+        Set-Content -LiteralPath $renderer -Value $patched -Encoding UTF8
     }
 }
 
@@ -2884,6 +3065,7 @@ function Install-All {
     Update-VsrifeTensorRtPrecision
     Ensure-RifeModels
     Install-Danmaku
+    Update-DanmakuShim3Compatibility
     Sync-VcRuntimeDlls
     Remove-StaleMpvVapourSynthDlls
     Configure-VapourSynthPython
@@ -2892,6 +3074,7 @@ function Install-All {
     Measure-RifeRuntimeCapability
     Update-ShimPortablePaths
     Update-ShimPortableFonts
+    Update-ShimExternalModalBridge
     Update-ShimConfig
     Remove-LegacyShimMpvCopies
     Write-LauncherScripts

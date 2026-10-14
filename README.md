@@ -163,6 +163,8 @@ jellyfin-mpv-shim-portable/config/cache/danmaku/
 
 Features include Jellyfin metadata matching, filename matching, manual search, smart aliases, density/opacity/font-size/speed/area controls, traditional-simplified conversion, deduplication, source filtering, and per-episode time offsets.
 
+For Shim 3's `mpvtk` playback UI, the installer adds a small external-modal bridge. `Shift+F10` and `Ctrl+F10` are forced project bindings; while the danmaku settings panel, search input, or result picker is open, the mpvtk bitmap HUD temporarily yields so the ASS/console UI remains visible. Closing the modal restores the normal HUD wake controls.
+
 ## Project Layout
 
 ```text

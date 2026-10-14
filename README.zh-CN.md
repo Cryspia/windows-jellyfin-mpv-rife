@@ -163,6 +163,8 @@ jellyfin-mpv-shim-portable/config/cache/danmaku/
 
 它支持 Jellyfin metadata 自动匹配、文件名匹配、手动搜索、别名记忆、密度/透明度/字号/速度/显示区域/繁简转换/去重/时间偏移等面板设置。
 
+针对 Shim 3 的 `mpvtk` 播放界面，安装器会加入外部模态界面桥接。`Shift+F10` 和 `Ctrl+F10` 使用项目专用的强制绑定；弹幕设置面板、搜索输入框或结果选择器打开期间，mpvtk 位图 HUD 会临时让出显示层，确保 ASS/console 界面可见；关闭后自动恢复正常的 HUD 唤醒控制。
+
 ## 目录结构
 
 ```text
