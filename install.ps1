@@ -71,6 +71,32 @@ function Write-Warn {
     Write-Host "[!] $Message" -ForegroundColor Yellow
 }
 
+function Write-Utf8NoBom {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+    [System.IO.File]::WriteAllText(
+        $Path,
+        $Value,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
+
+function Read-Utf8Text {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+    return [System.IO.File]::ReadAllText(
+        $Path,
+        [System.Text.UTF8Encoding]::new($false, $true)
+    )
+}
+
 function Invoke-Logged {
     param(
         [string]$FilePath,
@@ -938,11 +964,17 @@ function Install-Danmaku {
         if ($installPy) {
             $pythonExe = Join-Path $PythonDir "python.exe"
             $oldMpvHome = $env:MPV_HOME
+            $oldPythonUtf8 = $env:PYTHONUTF8
+            $oldPythonIoEncoding = $env:PYTHONIOENCODING
             $env:MPV_HOME = $MpvConfigDir
+            $env:PYTHONUTF8 = "1"
+            $env:PYTHONIOENCODING = "utf-8"
             try {
                 Invoke-Logged $pythonExe @($installPy.FullName)
             } finally {
                 $env:MPV_HOME = $oldMpvHome
+                $env:PYTHONUTF8 = $oldPythonUtf8
+                $env:PYTHONIOENCODING = $oldPythonIoEncoding
             }
         } else {
             $bundle = Get-ChildItem -Path $tmp -Directory | Select-Object -First 1
@@ -964,7 +996,10 @@ function Update-DanmakuShim3Compatibility {
         return
     }
 
-    $content = Get-Content -Raw -LiteralPath $main
+    # Windows PowerShell 5.1 treats UTF-8 without a BOM as the active ANSI
+    # code page unless encoding is explicit. The upstream Lua file contains
+    # translated menu labels, so a default Get-Content would corrupt them.
+    $content = Read-Utf8Text -Path $main
     $patched = $content
     if ($patched -notmatch 'mpvtk-external-modal') {
         $patched = $patched.Replace(
@@ -1062,7 +1097,7 @@ panel_open = function()
         throw "Danmaku Shim 3 compatibility patch did not match pinned revision $DanmakuRef"
     }
     if ($patched -ne $content) {
-        Set-Content -LiteralPath $main -Value $patched -Encoding UTF8
+        Write-Utf8NoBom -Path $main -Value $patched
     }
 }
 
@@ -1293,6 +1328,7 @@ set "CFG=%ROOT%\config\mpv"
 set "PY=%ROOT%\python"
 set PYTHONHOME=%PY%
 set PYTHONPATH=%PY%\Lib\site-packages
+set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 set VSSCRIPT_PATH=%PY%\Lib\site-packages\vapoursynth\vsscript.dll
 set DANMAKU_CACHE_DIR=%ROOT%\config\cache\danmaku
@@ -1507,6 +1543,7 @@ try {
     $PythonDir = Split-Path -Parent $PythonExe
     $env:PYTHONHOME = $PythonDir
     $env:PYTHONPATH = Join-Path $PythonDir "Lib\site-packages"
+    $env:PYTHONUTF8 = "1"
     $env:PYTHONIOENCODING = "utf-8"
     $env:VSSCRIPT_PATH = Join-Path $PythonDir "Lib\site-packages\vapoursynth\vsscript.dll"
     $env:PATH = "$PythonDir;$(Join-Path $PythonDir 'Scripts');$(Join-Path $PythonDir 'Lib\site-packages');$(Join-Path $PythonDir 'Lib\site-packages\vapoursynth');$(Join-Path $PythonDir 'Lib\site-packages\torch\lib');$(Join-Path $PythonDir 'Lib\site-packages\torch_tensorrt\lib');$(Join-Path $PythonDir 'Lib\site-packages\tensorrt_libs');$env:PATH"
