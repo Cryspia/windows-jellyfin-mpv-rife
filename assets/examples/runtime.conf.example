@@ -42,9 +42,9 @@ rife_concurrent_frames=4
 # extension is unavailable, runtime falls back to bilinear chroma upsampling.
 rife_chroma_upsample=krig
 
-# RIFE output chroma layout. "auto" writes YUV444P10 only when Krig is
-# available; otherwise it preserves source subsampling. Use 444/422/420/source
-# for explicit testing.
+# RIFE output chroma layout. With VSR enabled, "auto" writes YUV420P10 because
+# NVIDIA d3d11vpp cannot reliably create an output view for YUV444P10. With VSR
+# disabled, Krig can keep YUV444P10 output. Use 444/422/420/source for testing.
 rife_output_subsampling=auto
 
 # Runtime behavior when a matching TensorRT engine is missing.

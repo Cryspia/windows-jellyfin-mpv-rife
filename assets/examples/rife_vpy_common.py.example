@@ -41,8 +41,14 @@ def _runtime_conf() -> dict[str, str]:
 
 
 def _output_subsampling(source: vs.VideoNode, *, allow_auto: bool = False) -> str:
-    value = _runtime_conf().get("rife_output_subsampling", "source").lower()
+    conf = _runtime_conf()
+    value = conf.get("rife_output_subsampling", "source").lower()
     if allow_auto and value == "auto":
+        # NVIDIA d3d11vpp can advertise xv30 upload support but fail to create
+        # its output view for RIFE's YUV444P10 frames. Keep the Krig RGB input
+        # reconstruction, then return a VSR-compatible 4:2:0 surface.
+        if conf.get("enable_vsr", "yes").lower() not in ("no", "false", "0", "off"):
+            return "420"
         return "auto"
     if value == "auto":
         value = "source"

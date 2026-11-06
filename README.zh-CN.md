@@ -81,7 +81,9 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 
 根目录只保留双击入口；其他维护脚本在 `jellyfin-mpv-shim-portable/scripts/`。安装器会优先用系统自带的 .NET C# 编译器生成可固定到开始菜单/任务栏的 `.exe` 启动器；如果目标电脑没有编译器，则自动保留 `.bat` 启动器。Windows 10/11 会保护默认应用选择，安装器不会静默抢占视频文件关联。需要把本项目 MPV 设为默认播放器时，先运行 `scripts/register-mpv-file-association.bat`，再在“设置 > 应用 > 默认应用”里选择 `MPV Portable`，或右键视频文件选择“打开方式 > 选择其他应用”。
 
-安装器当前固定使用 Jellyfin MPV Shim 3.0.0、Jellyfin API Client 1.18.0、python-mpv-jsonipc 1.4.0、VapourSynth R80、PyTorch 2.12.1 CUDA 13.0、Torch-TensorRT 2.12.1、TensorRT 10.16.1.11 和 vsrife 5.7.0。暂不使用 Torch-TensorRT 2.13：vsrife 5.7 仍依赖 2.12 的混合精度编译接口，而 2.13 已移除相关参数，会静默忽略本项目用于防止光流溢出的精度策略。
+安装器当前固定使用 Jellyfin MPV Shim 3.3.0、Jellyfin API Client 1.21.0、python-mpv-jsonipc 1.5.0、VapourSynth R82、PyTorch 2.14.0 CUDA 13.0、Torch-TensorRT 2.14.0、TensorRT 11.1.0.106 和 vsrife 5.7.0。TensorRT 版本遵守 Torch-TensorRT 2.14 的 `>=11.1,<11.2` 约束，不会盲目安装不兼容的 PyPI 最新版。mpv 固定到经过本项目验证的 zhongfly Windows 构建标签，重新运行安装器会升级已有的旧 mpv，而不是只在文件缺失时下载。
+
+Shim 默认使用其 `large` 网络缓冲预设（20 秒、最多 400 MiB），以减少远程 Jellyfin 或反向代理短时抖动造成的停顿；健康检查间隔使用上游 3.3 默认的 300 秒，避免服务端持续返回 502/503 时陷入高频失败请求。两项都可以在 Shim 设置中修改。
 
 Shim 3 已用 mpv 内绘制的媒体库和设置界面替代旧 Tk 配置窗口。`start-shim` 默认最小化到托盘；通过托盘图标的“Show Library Browser”或“Configure Servers”打开界面。升级时会保留现有 `cred.json` 服务器凭据。
 
@@ -104,7 +106,7 @@ vapoursynth(RIFE) -> d3d11vpp(NVIDIA VSR)
 
 也就是说，低帧率 1080p 内容会先插帧再交给 NVIDIA 驱动级超分；高帧率 1080p 内容只做超分；高于 1080p 的低帧率内容默认保留原始 4K real frames，安装 benchmark 会尝试全分辨率 `4.26 x4/x3/x2`；如果 4K 档都无法通过，可用 `4.26 scale=0.5 x2` 作为最后兜底。RIFE 会在“不超过显示器刷新率”的前提下选择最高倍率，最高 x4；例如 24fps 在 60Hz 下最多 x2，在 120Hz 下最多 x4。
 
-RIFE 的普通路径优先使用 `vs_gpu_helpers.rife_yuv`，把 YUV/RGB 色彩转换和 RIFE 输入/输出放到 CUDA/TensorRT 管线里。GPU 路径只对白名单矩阵和 `limited/full` range 启用；YUV420P10/YUV422P10 源默认使用随项目提供的预编译 CUDA KrigBilateral chroma 扩展，在进 RIFE 前重建 RGB444；YUV444P10 源不需要 chroma upsample。`rife_output_subsampling=auto` 时，只有 Krig 可用才把插帧结果写成 YUV444P10；如果 Krig 扩展缺失，或者手动设置 `rife_chroma_upsample=bilinear`，输出会保留源 subsampling，维持旧逻辑。`runtime.conf` 可以用 `rife_output_subsampling=auto|420|422|444|source` 和 `rife_chroma_upsample=krig|bilinear` 手动覆盖。其他位深或异常 subsampling 会先规范化到 YUV420P10。可选的 4K 下采样 + VSR 路径在下采样后也遵守同一策略。如果 GPU helper 不可用，会回退到标准 `vsrife + core.resize.Bicubic` CPU 色转路径，而不是直接关闭插帧；如果逐帧颜色元数据不在白名单内，helper 会拒绝处理，避免静默产生错误颜色。HDR10 常见的 YUV420P10 / BT.2020 NCL frame props 会保留，但 RIFE 本身不是线性光 HDR-aware 插帧算法。
+RIFE 的普通路径优先使用 `vs_gpu_helpers.rife_yuv`，把 YUV/RGB 色彩转换和 RIFE 输入/输出放到 CUDA/TensorRT 管线里。GPU 路径只对白名单矩阵和 `limited/full` range 启用；YUV420P10/YUV422P10 源默认使用随项目提供的预编译 CUDA KrigBilateral chroma 扩展，在进 RIFE 前重建 RGB444；YUV444P10 源不需要 chroma upsample。`rife_output_subsampling=auto` 时，开启 VSR 会把插帧结果写成 YUV420P10，因为 NVIDIA `d3d11vpp` 对 YUV444P10 可能无法创建 video-processor output view；关闭 VSR 时，Krig 可用则仍保留 YUV444P10，Krig 不可用则保留源 subsampling。`runtime.conf` 可以用 `rife_output_subsampling=auto|420|422|444|source` 和 `rife_chroma_upsample=krig|bilinear` 手动覆盖，但同时强制 444 与 VSR 是否可用取决于驱动。其他位深或异常 subsampling 会先规范化到 YUV420P10。可选的 4K 下采样 + VSR 路径在下采样后也遵守同一策略。如果 GPU helper 不可用，会回退到标准 `vsrife + core.resize.Bicubic` CPU 色转路径，而不是直接关闭插帧；如果逐帧颜色元数据不在白名单内，helper 会拒绝处理，避免静默产生错误颜色。HDR10 常见的 YUV420P10 / BT.2020 NCL frame props 会保留，但 RIFE 本身不是线性光 HDR-aware 插帧算法。
 
 `-EnableDownsampled4kVsr` 是性能优先的 4K 可选路径：
 

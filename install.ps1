@@ -34,25 +34,32 @@ $ShimConfigDir = Join-Path $ConfigDir "jellyfin-mpv-shim"
 $CacheDir = Join-Path $ConfigDir "cache"
 
 $PythonVersion = "3.12.10"
-$ShimVersion = "3.0.0"
-$JellyfinApiClientVersion = "1.18.0"
+$ShimVersion = "3.3.0"
+$JellyfinApiClientVersion = "1.21.0"
 $PythonMpvVersion = "1.0.8"
-$PythonMpvJsonIpcVersion = "1.4.0"
+$PythonMpvJsonIpcVersion = "1.5.0"
 $PyWin32Version = "312"
-$VapourSynthVersion = "80"
+$VapourSynthVersion = "82"
 $VsrifeVersion = "5.7.0"
+$CertifiVersion = "2026.10.23"
+$RequestsVersion = "2.34.2"
+$WebSocketClientVersion = "1.9.2"
+$PillowVersion = "13.0.0"
 $PythonZipUrl = "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-embed-amd64.zip"
 $GetPipUrl = "https://bootstrap.pypa.io/get-pip.py"
 $SevenZipUrl = "https://www.7-zip.org/a/7zr.exe"
 $FfmpegZipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+$MpvBuildTag = "2026-11-06-9028187538"
+$MpvAssetName = "mpv-x86_64-20261106-git-9028187538.7z"
+$MpvAssetUrl = "https://github.com/zhongfly/mpv-winbuild/releases/download/$MpvBuildTag/$MpvAssetName"
 $DanmakuRef = "9968911091b1715e28ced983431b3ce88e04a676"
 $DanmakuZipUrl = "https://github.com/Cryspia/mpv-dandanplay-danmaku/archive/$DanmakuRef.zip"
 $GoogleFontsRawBase = "https://raw.githubusercontent.com/google/fonts/main/ofl"
 $PyTorchCudaIndex = "https://download.pytorch.org/whl/test/cu130"
 $NvidiaPipIndex = "https://pypi.nvidia.com"
-$TorchVersion = "2.12.1"
-$TensorRtVersion = "10.16.1.11"
-$TorchTensorRtVersion = "2.12.1"
+$TorchVersion = "2.14.0"
+$TensorRtVersion = "11.1.0.106"
+$TorchTensorRtVersion = "2.14.0"
 
 $MpvRootLauncherExe = Join-Path $PortableDir "MPV Portable.exe"
 $MpvRootLauncherBat = Join-Path $PortableDir "MPV Portable.bat"
@@ -552,22 +559,27 @@ function Install-Python {
 
 function Install-Mpv {
     $mpvExe = Join-Path $MpvDir "mpv.exe"
-    if (Test-Path $mpvExe) {
-        Write-Step "Portable mpv already exists"
+    $versionMarker = Join-Path $MpvDir "portable-build-tag.txt"
+    $installedTag = if (Test-Path $versionMarker) {
+        (Get-Content -Raw -LiteralPath $versionMarker).Trim()
+    } else {
+        ""
+    }
+    if ((Test-Path $mpvExe) -and $installedTag -eq $MpvBuildTag) {
+        Write-Step "Portable mpv $MpvBuildTag already exists"
         return
     }
-    Write-Step "Installing portable mpv Windows build"
+    Write-Step "Installing portable mpv Windows build $MpvBuildTag"
     if ($DryRun) {
-        $archive = Join-Path $DownloadsDir "mpv-latest.7z"
+        $archive = Join-Path $DownloadsDir $MpvAssetName
     } elseif ($SkipDownloads) {
-        $archive = Get-ChildItem -Path $DownloadsDir -File -Filter "mpv*.7z" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $archive) {
-            throw "Put an mpv .7z archive into $DownloadsDir or remove -SkipDownloads."
+        $archive = Join-Path $DownloadsDir $MpvAssetName
+        if (-not (Test-Path $archive)) {
+            throw "Put $MpvAssetName into $DownloadsDir or remove -SkipDownloads."
         }
     } else {
-        $asset = Get-GitHubLatestAsset "zhongfly/mpv-winbuild" "mpv-x86_64.*\.7z$"
-        $archive = Join-Path $DownloadsDir $asset.name
-        Download-File $asset.browser_download_url $archive
+        $archive = Join-Path $DownloadsDir $MpvAssetName
+        Download-File $MpvAssetUrl $archive
     }
     $tmp = Join-Path $PortableDir "_mpv_extract"
     if ((Test-Path $tmp) -and -not $DryRun) {
@@ -584,6 +596,7 @@ function Install-Mpv {
             Remove-Item -Path $MpvDir -Recurse -Force
         }
         Move-Item -Path $root -Destination $MpvDir
+        Set-Content -LiteralPath $versionMarker -Value $MpvBuildTag -Encoding ASCII
         Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
@@ -674,6 +687,10 @@ expected = {
     "pywin32": "$PyWin32Version",
     "vapoursynth": "$VapourSynthVersion",
     "vsrife": "$VsrifeVersion",
+    "certifi": "$CertifiVersion",
+    "requests": "$RequestsVersion",
+    "websocket-client": "$WebSocketClientVersion",
+    "pillow": "$PillowVersion",
 }
 for name, version in expected.items():
     if md.version(name) != version:
@@ -711,7 +728,7 @@ expected = {
     "torch-tensorrt": "$TorchTensorRtVersion",
 }
 for name, version in expected.items():
-    if md.version(name) != version:
+    if not md.version(name).startswith(version):
         raise SystemExit(1)
 import tensorrt
 import torch_tensorrt
@@ -748,6 +765,10 @@ function Install-PythonPackages {
             "pywin32==$PyWin32Version",
             "vapoursynth==$VapourSynthVersion",
             "vsrife==$VsrifeVersion",
+            "certifi==$CertifiVersion",
+            "requests==$RequestsVersion",
+            "websocket-client==$WebSocketClientVersion",
+            "pillow==$PillowVersion",
             "wheel-stub",
             "appdirs"
         )
@@ -775,6 +796,7 @@ function Install-PythonPackages {
         try {
             Invoke-Logged $pythonExe @(
                 "-m", "pip", "install",
+                "--extra-index-url", $PyTorchCudaIndex,
                 "--extra-index-url", $NvidiaPipIndex,
                 "tensorrt==$TensorRtVersion",
                 "torch_tensorrt==$TorchTensorRtVersion"
@@ -1112,7 +1134,7 @@ function Update-ShimPortablePaths {
         return
     }
 
-    $content = Get-Content -Raw -LiteralPath $options
+    $content = Read-Utf8Text -Path $options
     $patched = $content
     if ($patched -notmatch '(?m)^import os$') {
         $patched = $patched.Replace("import logging`r`nimport platform", "import logging`r`nimport os`r`nimport platform")
@@ -1150,7 +1172,7 @@ function Update-ShimPortablePaths {
         throw "jellyfin-mpv-shim $ShimVersion portable path patch did not match upstream mpv_options.py"
     }
     if ($patched -ne $content) {
-        Set-Content -LiteralPath $options -Value $patched -Encoding UTF8
+        Write-Utf8NoBom -Path $options -Value $patched
     }
 }
 
@@ -1165,7 +1187,7 @@ function Update-ShimPortableFonts {
         return
     }
 
-    $content = Get-Content -Raw -LiteralPath $pilfont
+    $content = Read-Utf8Text -Path $pilfont
     $patched = $content
     # Remove a preference written by an earlier run so changing the locale is reversible.
     $patched = [Regex]::Replace($patched, '(?m)^\s+"msyh(?:bd)?\.ttc",\r?\n', '')
@@ -1230,7 +1252,7 @@ function Update-ShimPortableFonts {
         throw "jellyfin-mpv-shim $ShimVersion portable CJK font patch did not match upstream pilfont.py"
     }
     if ($patched -ne $content) {
-        Set-Content -LiteralPath $pilfont -Value $patched -Encoding UTF8
+        Write-Utf8NoBom -Path $pilfont -Value $patched
     }
 }
 
@@ -1245,8 +1267,31 @@ function Update-ShimExternalModalBridge {
         return
     }
 
-    $content = Get-Content -Raw -LiteralPath $renderer
+    $content = Read-Utf8Text -Path $renderer
     $patched = $content
+    # Windows PowerShell 5.1 used the active ANSI code page when this file was
+    # read by older installer revisions. Repair their corrupted UTF-8 ellipsis
+    # before applying or validating the bridge patch.
+    $ellipsis = [char]0x2026
+    $patched = [Regex]::Replace(
+        $patched,
+        "(?m)^\s*local ell = text_w\([^\r\n]*$",
+        "    local ell = text_w('$ellipsis', size, bold)",
+        1
+    )
+    $patched = [Regex]::Replace(
+        $patched,
+        "(?m)^\s*return table\.concat\(out\) \.\. [^\r\n]*$",
+        "    return table.concat(out) .. '$ellipsis'",
+        1
+    )
+    $bullet = [char]0x2022
+    $patched = [Regex]::Replace(
+        $patched,
+        "(?m)^\s*local disp = node\.mask and string\.rep\([^\r\n]*$",
+        "    local disp = node.mask and string.rep('$bullet', u8_count(text)) or text",
+        1
+    )
     if ($patched -notmatch "mpvtk-external-modal") {
         $patched = [Regex]::Replace(
             $patched,
@@ -1298,7 +1343,7 @@ end)
         throw "jellyfin-mpv-shim $ShimVersion external modal bridge patch did not match renderer.lua"
     }
     if ($patched -ne $content) {
-        Set-Content -LiteralPath $renderer -Value $patched -Encoding UTF8
+        Write-Utf8NoBom -Path $renderer -Value $patched
     }
 }
 
@@ -1867,10 +1912,18 @@ function Update-ShimConfig {
     & $setJson $json "screenshot_dir" $null
     & $setJson $json "auto_play" $true
     & $setJson $json "playback_timeout" 60
-    # Recover promptly when a reverse proxy or the network drops a Jellyfin
-    # session. Preserve explicit user tuning, but replace the upstream default.
-    if (-not ($json.PSObject.Properties.Name -contains "health_check_interval") -or $json.health_check_interval -eq 300) {
-        & $setJson $json "health_check_interval" 30
+    # Older project releases shortened this to 30 seconds. A failed server
+    # check can itself block for about 80 seconds, so an outage kept the shim
+    # almost permanently inside network retries. Restore the upstream 3.3
+    # interval while preserving any value the user chose explicitly.
+    if (-not ($json.PSObject.Properties.Name -contains "health_check_interval") -or $json.health_check_interval -eq 30) {
+        & $setJson $json "health_check_interval" 300
+    }
+    # Jellyfin is normally a network source. The upstream default buffers only
+    # one second; use its built-in 20-second/400-MiB preset unless the user has
+    # already selected another policy.
+    if (-not ($json.PSObject.Properties.Name -contains "network_buffer") -or $json.network_buffer -eq "default") {
+        & $setJson $json "network_buffer" "large"
     }
     # Shim's upstream default remote_kbps=10000 can force remote/reverse-proxy
     # Jellyfin sessions into HLS transcode and lose HDR/color metadata. Seed an
