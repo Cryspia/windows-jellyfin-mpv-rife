@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 
 import vapoursynth as vs
+from rife_backend import cache_dir, profile
 
 core = vs.core
 _MISSING_TRT_CACHE = "RIFE_MISSING_TRT_CACHE"
@@ -12,17 +13,6 @@ _P10_FORMAT_BY_SUBSAMPLING = {
     "422": vs.YUV422P10,
     "444": vs.YUV444P10,
 }
-
-
-def _cache_dir() -> Path:
-    override = os.environ.get("RIFE_TRT_CACHE_DIR")
-    if override:
-        trt_cache_dir = Path(override)
-        trt_cache_dir.mkdir(parents=True, exist_ok=True)
-        return trt_cache_dir
-    trt_cache_dir = Path(__file__).resolve().parents[1] / "cache" / "rife-trt"
-    trt_cache_dir.mkdir(parents=True, exist_ok=True)
-    return trt_cache_dir
 
 
 def _runtime_conf() -> dict[str, str]:
@@ -104,13 +94,14 @@ def _cpu_rife(
     width: int | None = None,
     height: int | None = None,
 ) -> vs.VideoNode:
-    if os.environ.get("RIFE_ALLOW_INLINE_TRT_BUILD") != "1":
+    use_trt = profile()["backend"] != "torch"
+    if use_trt and os.environ.get("RIFE_ALLOW_INLINE_TRT_BUILD") != "1":
         raise RuntimeError(_MISSING_TRT_CACHE)
 
     from vsrife import rife
 
     resize_args = {
-        "format": vs.RGBH,
+        "format": vs.RGBS if profile()["precision"] == "fp32" else vs.RGBH,
     }
     if width is not None:
         resize_args["width"] = width
@@ -120,12 +111,12 @@ def _cpu_rife(
     clip = rife(
         clip,
         model=model,
-        scale=scale,
+        scale=float(scale),
         factor_num=factor_num,
         factor_den=factor_den,
         auto_download=False,
-        trt=True,
-        trt_cache_dir=str(_cache_dir()),
+        trt=use_trt,
+        trt_cache_dir=str(cache_dir()) if use_trt else "",
     )
     out_format = _P10_FORMAT_BY_SUBSAMPLING[_output_subsampling(source)]
 
@@ -143,16 +134,23 @@ def run_rife_profile(
     factor_num: int = 2,
     factor_den: int = 1,
     downsample_1080: bool = False,
+    strict: bool = False,
 ) -> vs.VideoNode:
     target_w = None
     target_h = None
-    if downsample_1080:
+    if downsample_1080 and source.height > 1080:
         target_h = 1080
         target_w = ((source.width * target_h) // source.height) & ~1
 
+    if profile()["backend"] == "torch":
+        return _cpu_rife(
+            source, model=model, scale=scale, factor_num=factor_num,
+            factor_den=factor_den, width=target_w, height=target_h,
+        )
+
     try:
         gpu_clip = _gpu_input(source)
-        if downsample_1080:
+        if target_w is not None:
             from vs_gpu_helpers import downsample_yuvp10_gpu, rife_yuv
 
             gpu_clip = downsample_yuvp10_gpu(
@@ -173,7 +171,7 @@ def run_rife_profile(
             chroma_upsample=_chroma_upsample(),
         )
     except Exception as gpu_exc:
-        if _MISSING_TRT_CACHE in str(gpu_exc) or "TensorRT cache is missing" in str(gpu_exc):
+        if strict or _MISSING_TRT_CACHE in str(gpu_exc) or "TensorRT cache is missing" in str(gpu_exc):
             raise
         try:
             return _cpu_rife(

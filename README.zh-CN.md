@@ -81,7 +81,7 @@ Get-ChildItem .\jellyfin-mpv-shim-portable -Recurse -Filter *.ps1 | Unblock-File
 
 根目录只保留双击入口；其他维护脚本在 `jellyfin-mpv-shim-portable/scripts/`。安装器会优先用系统自带的 .NET C# 编译器生成可固定到开始菜单/任务栏的 `.exe` 启动器；如果目标电脑没有编译器，则自动保留 `.bat` 启动器。Windows 10/11 会保护默认应用选择，安装器不会静默抢占视频文件关联。需要把本项目 MPV 设为默认播放器时，先运行 `scripts/register-mpv-file-association.bat`，再在“设置 > 应用 > 默认应用”里选择 `MPV Portable`，或右键视频文件选择“打开方式 > 选择其他应用”。
 
-安装器当前固定使用 Jellyfin MPV Shim 3.3.0、Jellyfin API Client 1.21.0、python-mpv-jsonipc 1.5.0、VapourSynth R82、PyTorch 2.14.0 CUDA 13.0、Torch-TensorRT 2.14.0、TensorRT 11.1.0.106 和 vsrife 5.7.0。TensorRT 版本遵守 Torch-TensorRT 2.14 的 `>=11.1,<11.2` 约束，不会盲目安装不兼容的 PyPI 最新版。mpv 固定到经过本项目验证的 zhongfly Windows 构建标签，重新运行安装器会升级已有的旧 mpv，而不是只在文件缺失时下载。
+安装器固定使用 Jellyfin MPV Shim 3.3.0、Jellyfin API Client 1.21.0、python-mpv-jsonipc 1.5.0、VapourSynth R82、PyTorch 2.14.0 CUDA 13.0 和 vsrife 5.7.0。标准 RIFE 后端使用 Torch-TensorRT 2.14.0 和 TensorRT 11.1.0.106。mpv 固定到经过本项目验证的 zhongfly Windows 构建标签，重新运行安装器会升级已有的旧 mpv，而不是只在文件缺失时下载。
 
 Shim 默认使用其 `large` 网络缓冲预设（20 秒、最多 400 MiB），以减少远程 Jellyfin 或反向代理短时抖动造成的停顿；健康检查间隔使用上游 3.3 默认的 300 秒，避免服务端持续返回 502/503 时陷入高频失败请求。两项都可以在 Shim 设置中修改。
 
@@ -116,7 +116,23 @@ RIFE 的普通路径优先使用 `vs_gpu_helpers.rife_yuv`，把 YUV/RGB 色彩�
 
 这条路径可以让 4K 24fps 在本机 4080 上跑到 x4，但 real frames 也会经过 1080p 中间流，原始 4K 高频信息会丢失。默认关闭。
 
-RIFE 默认使用经过 patch 的 TensorRT 混合精度策略。安装器会 patch 上游 `vsrife`，把 TensorRT 编译参数从 `use_explicit_typing=True` 改成 `use_explicit_typing=False` 加 `enabled_precisions={torch.float16, torch.float32}`；这样保留 FP16 吞吐，同时允许 TensorRT 在需要的位置使用 FP32 累加，避免快速运动和 RTX 50 系 / Blackwell 环境下可能出现的光流溢出花帧。
+### RIFE 后端
+
+`auto` 在检测到 RTX 50 系时默认选 TensorRT-RTX 混合精度，其他显卡默认用标准 TRT 混合精度；已安装的可用配置会保留。50 系日常回退请用标准 TRT FP32，也可以用纯 PyTorch CUDA 排查。
+
+切换前请关闭 mpv 并退出 Shim：
+
+```powershell
+.\install.ps1 install -RifeTrtBackend rtx -RifePrecision mixed
+.\install.ps1 install -RifeTrtBackend standard -RifePrecision fp32
+.\install.ps1 install -RifeTrtBackend torch
+```
+
+`rtx` 使用 Torch-TensorRT-RTX 2.14.0 和 TensorRT-RTX 1.6.1.120。标准 TRT 的混合精度在 Blackwell 上仍可能导致插值帧花屏。第二条命令切回标准 TRT，使用 FP32 输入并禁用 TF32；第三条命令使用纯 PyTorch CUDA 推理，不安装 TRT。`mixed` 使用 FP16 输入并允许部分层以 FP32 执行，不代表所有引擎都不会溢出。
+
+切换时安装器会在临时 Python 副本中安装并测试，成功才替换当前运行时，不会把标准和 RTX 两套 bindings 装在一起。用 `install.ps1 status` 查看实际后端和精度，不要编辑生成的 `config/mpv/rife-backend.json` 来切换。`config/cache/rife-trt/` 按后端、版本、精度和 GPU 隔离引擎及验证标记，旧版未分目录的缓存不再使用。安装测速会在 `config/logs/` 为各配置分别保存 JSON 报告，切换后可重新测速以调整插帧倍率上限。
+
+仅在 Blackwell 上做对照实验时，才显式运行 `install.ps1 install -RifeTrtBackend standard -RifePrecision mixed -AllowExperimentalBlackwellStandardMixed`。若安装自检失败或播放出现花帧，请停止该组测试。与 RTX 混合精度、标准 TRT FP32 对照时，用同一片段、同一插帧倍率，每组重新编译自己的引擎。实验结束后，不带后端参数重新安装会恢复 RTX。
 
 安装时脚本还会用内置的全分辨率和兜底 RIFE 配置预编译常见 720p、1080p 和 4K TensorRT engine；如果启用 `-EnableDownsampled4kVsr`，也会预编译 4K 下采样 profile。这样可以避免播放时触发耗时很长的 TensorRT engine 编译。4K engine 即使在高端显卡上也可能需要数分钟编译；只有在需要快速安装时才建议使用 `-SkipRifeTrtPrecompile`，并接受未缓存的 RIFE 档位会先不插帧播放，同时独立的低优先级后台 Python 进程编译缺失 cache。如果触发时已经有另一个 RIFE 滤镜在运行，autorife 会先卸掉它，避免 TensorRT 编译和实时 RIFE 推理同时抢 GPU。编译完成后，再按一次 `F9` 启用请求的 RIFE 模式。当前播放中的 VapourSynth 滤镜内 inline 编译仍然被禁止，因为这在 Windows 上可能直接卡死或退出 mpv。RIFE 到 RIFE 的直接热切换也会被保护：当前视频已经挂着 RIFE 滤镜时，如果按 `F9` 切到另一个启用 RIFE 的档位，第一次会先卸掉当前 RIFE 并保持播放，第二次再启用记录下来的目标档位。这样避免在 Windows 上原地替换运行中的 VapourSynth TensorRT 滤镜导致 mpv/Python 崩溃。
 
@@ -216,5 +232,5 @@ portable 目录由安装器生成，不应把需要持久维护的依赖手工�
 - 默认安装结束会清理 `_downloads` 和临时解压目录；调试安装问题时可使用 `-KeepDownloads`。
 - 更新本项目后重新运行 `install.ps1 install`，即可安装本项目最新验证过的弹幕版本。
 - 当前固定的弹幕版本包含 Shim 3 mpvtk 兼容修复：右侧弹幕图标仅在鼠标悬停时抢占强制左键绑定，因此按钮可以点击，同时不会阻断其他区域的 Shim HUD 操作。
-- 如果更新后插帧结果花屏，删除 `jellyfin-mpv-shim-portable/config/cache/rife-trt/` 并重新运行 `install.ps1 install`，让 TensorRT engine 用 patch 后的混合精度策略重新编译。
+- RTX 50 系出现插值帧花屏时，先用 `install.ps1 status` 核对后端，切到 `-RifeTrtBackend rtx -RifePrecision mixed`。仍有异常可用 `-RifePrecision fp32` 或 `-RifeTrtBackend torch` 排查。
 

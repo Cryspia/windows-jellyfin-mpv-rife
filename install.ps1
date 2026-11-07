@@ -8,6 +8,11 @@ param(
     [switch]$SkipRifeTrtPrecompile,
     [switch]$BenchmarkRifeRuntime,
     [switch]$EnableDownsampled4kVsr,
+    [ValidateSet("auto", "standard", "rtx", "torch")]
+    [string]$RifeTrtBackend = "auto",
+    [ValidateSet("mixed", "fp32")]
+    [string]$RifePrecision,
+    [switch]$AllowExperimentalBlackwellStandardMixed,
     [ValidateSet("sc", "tc", "hk", "jp", "kr")]
     [string]$CjkFontLanguage = "sc"
 )
@@ -59,7 +64,10 @@ $PyTorchCudaIndex = "https://download.pytorch.org/whl/test/cu130"
 $NvidiaPipIndex = "https://pypi.nvidia.com"
 $TorchVersion = "2.14.0"
 $TensorRtVersion = "11.1.0.106"
+$TensorRtRtxVersion = "1.6.1.120"
 $TorchTensorRtVersion = "2.14.0"
+$OriginalPath = $env:PATH
+$RifeProfilePath = Join-Path $MpvConfigDir "rife-backend.json"
 
 $MpvRootLauncherExe = Join-Path $PortableDir "MPV Portable.exe"
 $MpvRootLauncherBat = Join-Path $PortableDir "MPV Portable.bat"
@@ -293,7 +301,7 @@ function Copy-ExampleIfMissing {
 
 function Initialize-Config {
     Write-Step "Initializing persistent config inside portable"
-    Ensure-Directory (Join-Path $CacheDir "rife-trt\.validated")
+    if ($DryRun) { return }
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "mpv.conf.example") (Join-Path $MpvConfigDir "mpv.conf")
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "input.conf.example") (Join-Path $MpvConfigDir "input.conf")
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "runtime.conf.example") (Join-Path $MpvConfigDir "runtime.conf")
@@ -310,6 +318,7 @@ function Initialize-Config {
         Copy-Item -LiteralPath (Join-Path $ExamplesDir "$name.example") -Destination (Join-Path $MpvConfigDir $name) -Force
     }
     Copy-Item -LiteralPath (Join-Path $ExamplesDir "rife_vpy_common.py.example") -Destination (Join-Path $MpvConfigDir "rife_vpy_common.py") -Force
+    Copy-Item -LiteralPath (Join-Path $ExamplesDir "rife_backend.py.example") -Destination (Join-Path $MpvConfigDir "rife_backend.py") -Force
     Copy-Item -LiteralPath (Join-Path $ExamplesDir "vs_gpu_helpers.py.example") -Destination (Join-Path $MpvConfigDir "vs_gpu_helpers.py") -Force
     Copy-Item -LiteralPath (Join-Path $ExamplesDir "rife_trt_build_cache.py.example") -Destination (Join-Path $MpvConfigDir "rife_trt_build_cache.py") -Force
     Copy-ExampleIfMissing (Join-Path $ExamplesDir "shim-conf.json.example") (Join-Path $ShimConfigDir "conf.json")
@@ -404,19 +413,20 @@ function Update-MpvRuntimePolicyConfig {
 
 function Get-NvidiaGpuGeneration {
     $nvidiaSmi = Get-Command "nvidia-smi.exe" -ErrorAction SilentlyContinue
-    if (-not $nvidiaSmi) {
-        return $null
+    $names = @()
+    if ($nvidiaSmi) {
+        try { $names = & $nvidiaSmi.Source --query-gpu=name --format=csv,noheader 2>$null } catch {}
     }
-
-    try {
-        $names = & $nvidiaSmi.Source --query-gpu=name --format=csv,noheader 2>$null
-    } catch {
-        return $null
+    if (-not $names) {
+        $names = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Name
     }
 
     $generations = @()
     foreach ($name in $names) {
-        if ($name -match "RTX\s+([0-9]{2})[0-9]{2}") {
+        if ($name -match "RTX.*Blackwell") {
+            $generations += 50
+        } elseif ($name -match "GeForce\s+RTX\s+([0-9]{2})[0-9]{2}\b") {
             $generations += [int]$Matches[1]
         }
     }
@@ -426,54 +436,6 @@ function Get-NvidiaGpuGeneration {
     return ($generations | Measure-Object -Maximum).Maximum
 }
 
-function Set-RifeTensorRtInFile {
-    param(
-        [string]$Path,
-        [bool]$Enabled
-    )
-
-    if (-not (Test-Path $Path)) {
-        return
-    }
-    $value = if ($Enabled) { "True" } else { "False" }
-    if ($DryRun) {
-        Write-Host "DRY-RUN: set trt=$value in $Path"
-        return
-    }
-
-    $content = Get-Content -LiteralPath $Path -Raw
-    $updated = $content -replace "trt\s*=\s*(True|False)\s*,", "trt=$value,"
-    if ($updated -ne $content) {
-        Set-Content -LiteralPath $Path -Value $updated -Encoding UTF8
-    }
-}
-
-function Configure-RifeTensorRtForGpu {
-    $generation = Get-NvidiaGpuGeneration
-    if ($null -eq $generation) {
-        Write-Warn "Could not detect NVIDIA GPU generation. Keeping TensorRT enabled for RIFE."
-        return
-    }
-
-    if ($generation -ge 50) {
-        Write-Step "Detected RTX $generation-series / Blackwell GPU; keeping patched mixed-precision TensorRT enabled for RIFE"
-    } else {
-        Write-Step "Detected RTX $generation-series GPU; keeping TensorRT enabled for RIFE"
-    }
-
-    foreach ($name in @(
-        "rife-4.26.vpy",
-        "rife-4.26-x2.vpy",
-        "rife-4.26-x3.vpy",
-        "rife-4.26-x4.vpy",
-        "rife-4.26-half-x2.vpy",
-        "rife-4.26-down1080-x2.vpy",
-        "rife-4.26-down1080-x3.vpy",
-        "rife-4.26-down1080-x4.vpy"
-    )) {
-        Set-RifeTensorRtInFile (Join-Path $MpvConfigDir $name) $true
-    }
-}
 
 function Update-VsrifeTensorRtPrecision {
     Write-Step "Patching vsrife TensorRT precision policy"
@@ -488,32 +450,26 @@ function Update-VsrifeTensorRtPrecision {
         return
     }
 
-    $content = Get-Content -LiteralPath $vsrifeInit -Raw
-    if (($content -match "use_explicit_typing=False,\s*\r?\n\s*enabled_precisions=\{torch\.float16,\s*torch\.float32\}") -and ($content -notmatch "use_explicit_typing=True")) {
-        return
+    $content = Read-Utf8Text $vsrifeInit
+    $updated = $content
+    if (-not $updated.Contains('import tensorrt_rtx as tensorrt')) {
+        $updated = [regex]::Replace($updated, '(?m)^        import tensorrt\r?$', @'
+        if os.environ.get("RIFE_TRT_BACKEND") == "rtx":
+            import tensorrt_rtx as tensorrt
+        else:
+            import tensorrt
+'@)
     }
-
-    $target = "use_explicit_typing=True,"
-    $replacement = "use_explicit_typing=False,`r`n                enabled_precisions={torch.float16, torch.float32},"
-    if ($content.Contains($target)) {
-        $updated = $content.Replace($target, $replacement)
-    } elseif ($content -match "enabled_precisions=\{torch\.float16,\s*torch\.float32\},") {
-        $updated = $content -replace "enabled_precisions=\{torch\.float16,\s*torch\.float32\},", $replacement
-    } else {
-        Write-Warn "Could not find TensorRT precision settings in $vsrifeInit. RIFE TensorRT precision patch was not applied."
-        return
+    $updated = $updated -replace '(?m)^( +)use_explicit_typing=True,', "`$1use_explicit_typing=False,`n`$1enabled_precisions={torch.float16, torch.float32},"
+    $updated = $updated.Replace('enabled_precisions={torch.float16, torch.float32},', 'enabled_precisions={torch.float16, torch.float32} if fp16 else {torch.float32},')
+    # vsrife otherwise allows TF32 for FP32 inputs on Ampere and newer.
+    $updated = $updated -replace '(?m)^( +)(enabled_precisions=\{torch.float16, torch.float32\} if fp16 else \{torch.float32\},)(?!\r?\n +disable_tf32=)', "`$1`$2`n`$1disable_tf32=not fp16,"
+    if (-not $updated.Contains('import tensorrt_rtx as tensorrt') -or
+        [regex]::Matches($updated, 'disable_tf32=not fp16').Count -ne 2) {
+        throw "vsrife $VsrifeVersion TensorRT patch did not match $vsrifeInit"
     }
-
-    Set-Content -LiteralPath $vsrifeInit -Value $updated -Encoding UTF8
-
-    $trtCache = Join-Path $CacheDir "rife-trt"
-    if (Test-Path $trtCache) {
-        Write-Warn "Removing existing RIFE TensorRT engine cache so engines rebuild with mixed precision"
-        Remove-Item -LiteralPath $trtCache -Recurse -Force
-    }
-    $vsrifeModelDir = Join-Path $PythonDir "Lib\site-packages\vsrife\models"
-    if (Test-Path $vsrifeModelDir) {
-        Get-ChildItem -LiteralPath $vsrifeModelDir -Filter "*.ts" -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    if ($updated -ne $content) {
+        Write-Utf8NoBom -Path $vsrifeInit -Value $updated
     }
 }
 
@@ -630,7 +586,8 @@ function Test-PythonModule {
     param(
         [string]$PythonExe,
         [string]$Code,
-        [switch]$ShowOutput
+        [switch]$ShowOutput,
+        [int]$TimeoutSeconds = 60
     )
 
     if (-not (Test-Path $PythonExe)) {
@@ -643,10 +600,17 @@ function Test-PythonModule {
     Set-PortablePythonEnvironment
     try {
         Set-Content -Path $scriptPath -Value $Code -Encoding UTF8
-        $p = Start-Process -FilePath $PythonExe -ArgumentList @($scriptPath) -WorkingDirectory $ProjectRoot -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        $p = Start-Process -FilePath $PythonExe -ArgumentList ('"{0}"' -f $scriptPath) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        $null = $p.Handle
+        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+            $p.Kill()
+            $p.WaitForExit()
+            Write-Warn "Portable Python self-test timed out after ${TimeoutSeconds}s."
+            return $false
+        }
         if ($ShowOutput) {
             if (Test-Path $stdoutPath) {
-                Get-Content -LiteralPath $stdoutPath
+                Get-Content -LiteralPath $stdoutPath | ForEach-Object { Write-Host $_ }
             }
             if (Test-Path $stderrPath) {
                 Get-Content -LiteralPath $stderrPath | ForEach-Object { Write-Host $_ }
@@ -704,36 +668,224 @@ raise SystemExit(1 if missing else 0)
 }
 
 function Test-CudaTorch {
-    param([string]$PythonExe)
+    param([string]$PythonExe, [switch]$ShowOutput)
     $code = @"
 import torch
 expected = "$TorchVersion"
-if not torch.__version__.startswith(expected):
-    raise SystemExit(1)
-if not torch.backends.cuda.is_built():
-    raise SystemExit(2)
-if not torch.cuda.is_available():
-    raise SystemExit(3)
+assert torch.__version__ == expected + "+cu130" and torch.version.cuda == "13.0", (torch.__version__, torch.version.cuda)
+assert torch.backends.cuda.is_built() and torch.cuda.is_available(), "CUDA unavailable"
 torch.ones(1, device="cuda")
 "@
-    return (Test-PythonModule $PythonExe $code)
+    return (Test-PythonModule $PythonExe $code -ShowOutput:$ShowOutput)
 }
 
 function Test-TensorRtPackages {
+    param([string]$PythonExe, [switch]$ShowOutput)
+    $version = if ($SelectedRifeBackend -eq "rtx") { $TensorRtRtxVersion } else { $TensorRtVersion }
+    $code = @"
+import importlib
+import importlib.metadata as md
+import importlib.util
+import re
+import torch
+backend = "$SelectedRifeBackend"
+runtime = "tensorrt-rtx" if backend == "rtx" else "tensorrt"
+bridge = "torch-" + runtime
+names = {re.sub(r"[-_.]+", "-", d.metadata["Name"]).lower(): d.version for d in md.distributions() if d.metadata["Name"]}
+required = {runtime, runtime + "-cu13", runtime + "-cu13-bindings", runtime + "-cu13-libs"}
+expected = required | {bridge} if backend != "torch" else set()
+assert {n for n in names if n.startswith(("tensorrt", "torch-tensorrt"))} == expected, "Conflicting or missing TensorRT distributions"
+for family in ("tensorrt", "tensorrt_rtx"):
+    if backend == "torch" or family != runtime.replace("-", "_"):
+        for suffix in ("", "_bindings", "_libs"):
+            assert importlib.util.find_spec(family + suffix) is None, "Conflicting bindings: " + family + suffix
+if backend == "torch":
+    assert importlib.util.find_spec("torch_tensorrt") is None
+    raise SystemExit(0)
+assert all(names[n] == "$version" for n in required), "TensorRT package version mismatch"
+assert names[bridge].split("+")[0] == "$TorchTensorRtVersion", "Torch-TensorRT version mismatch"
+trt = importlib.import_module(runtime.replace("-", "_"))
+import torch_tensorrt
+assert trt.__version__ == "$version"
+assert callable(torch_tensorrt.dynamo.compile)
+"@
+    return (Test-PythonModule $PythonExe $code -ShowOutput:$ShowOutput)
+}
+
+function Test-RifeBackendInference {
     param([string]$PythonExe)
     $code = @"
-import importlib.metadata as md
-expected = {
-    "tensorrt": "$TensorRtVersion",
-    "torch-tensorrt": "$TorchTensorRtVersion",
-}
-for name, version in expected.items():
-    if not md.version(name).startswith(version):
-        raise SystemExit(1)
-import tensorrt
-import torch_tensorrt
+import os
+import tempfile
+import numpy as np
+import torch
+import vapoursynth as vs
+from vsrife import rife
+os.environ["RIFE_TRT_BACKEND"] = "$SelectedRifeBackend"
+torch.ones(1, device="cuda")
+fmt = vs.RGBS if "$SelectedRifePrecision" == "fp32" else vs.RGBH
+base = vs.core.std.BlankClip(width=256, height=256, format=fmt, length=2)
+x = np.linspace(0, 1, 256, dtype=np.float32)
+def motion(n, f):
+    out = f.copy()
+    for plane in range(3):
+        np.asarray(out[plane])[:] = np.roll(x, n * 12)[None, :]
+    return out
+clip = vs.core.std.ModifyFrame(base, base, motion)
+with tempfile.TemporaryDirectory() as cache:
+    args = dict(model="4.26", factor_num=2, auto_download=False)
+    ref = np.stack([np.asarray(p, dtype=np.float32) for p in rife(clip, **args).get_frame(1)])
+    if "$SelectedRifeBackend" != "torch":
+        out = rife(clip, trt=True, trt_cache_dir=cache, **args)
+        frame = np.stack([np.asarray(p, dtype=np.float32) for p in out.get_frame(1)])
+    else:
+        frame = ref
+    mae = float(np.abs(frame - ref).mean())
+    print(f"RIFE $SelectedRifeBackend/${SelectedRifePrecision}: range={frame.min():.5f}..{frame.max():.5f}, MAE={mae:.6f}")
+    assert np.isfinite(frame).all() and frame.min() >= -0.1 and frame.max() <= 1.1 and mae < 0.03
 "@
-    return (Test-PythonModule $PythonExe $code)
+    if (-not (Test-PythonModule $PythonExe $code -ShowOutput -TimeoutSeconds 240)) {
+        throw "RIFE $SelectedRifeBackend/$SelectedRifePrecision GPU inference self-test failed."
+    }
+}
+
+function Read-RifeBackendProfile {
+    if (Test-Path -LiteralPath $RifeProfilePath) {
+        try {
+            return (Read-Utf8Text $RifeProfilePath | ConvertFrom-Json)
+        } catch {
+            Write-Warn "Ignoring invalid RIFE backend profile. Rerun install to regenerate it."
+        }
+    }
+}
+
+function Select-RifeBackend {
+    $installed = Read-RifeBackendProfile
+    $blackwell = (Get-NvidiaGpuGeneration) -ge 50
+    $script:SelectedRifeBackend = if ($RifeTrtBackend -ne "auto") { $RifeTrtBackend }
+        elseif ($blackwell -and (-not $installed -or
+            ($installed.backend -eq "standard" -and $installed.precision -ne "fp32"))) { "rtx" }
+        elseif ($installed.backend -in @("standard", "rtx", "torch")) { $installed.backend }
+        else { "standard" }
+    $script:SelectedRifePrecision = if ($RifePrecision) { $RifePrecision }
+        elseif ($installed.backend -eq $SelectedRifeBackend -and $installed.precision -in @("mixed", "fp32")) { $installed.precision }
+        else { "mixed" }
+    if ($blackwell -and $SelectedRifeBackend -eq "standard" -and $SelectedRifePrecision -eq "mixed") {
+        if (-not ($AllowExperimentalBlackwellStandardMixed -and $RifeTrtBackend -eq "standard" -and $RifePrecision -eq "mixed")) {
+            throw "Standard TensorRT mixed can corrupt frames on RTX 50-series. Use RTX or standard FP32. For comparison testing only, explicitly pass -RifeTrtBackend standard -RifePrecision mixed -AllowExperimentalBlackwellStandardMixed."
+        }
+        Write-Warn "Experimental Blackwell standard/mixed mode: stop playback if interpolated frames are corrupted. An automatic install will select RTX again."
+    }
+    Write-Step "RIFE profile: $SelectedRifeBackend / $SelectedRifePrecision"
+}
+
+function Write-RifeBackendProfile {
+    param([string]$PythonExe)
+    $probe = & $PythonExe -c 'import json, torch; print(json.dumps(dict(torch=torch.__version__, cuda=torch.version.cuda, gpu=torch.cuda.get_device_name(0))))'
+    if ($LASTEXITCODE -ne 0) { throw "Could not identify portable PyTorch/GPU for RIFE cache isolation." }
+    $hardware = $probe | ConvertFrom-Json
+    $torch, $cuda, $gpu = $hardware.torch, $hardware.cuda, $hardware.gpu
+    if (-not ($torch -and $cuda -and $gpu)) { throw "Incomplete portable PyTorch/GPU identity." }
+    $version = switch ($SelectedRifeBackend) {
+        "standard" { $TensorRtVersion }
+        "rtx" { $TensorRtRtxVersion }
+        "torch" { "none" }
+    }
+    $bridge = if ($SelectedRifeBackend -eq "torch") { "none" } else {
+        $name = if ($SelectedRifeBackend -eq "rtx") { "torch-tensorrt-rtx" } else { "torch-tensorrt" }
+        & $PythonExe -c "from importlib.metadata import version; print(version('$name'))"
+        if ($LASTEXITCODE -ne 0) { throw "Could not identify installed $name." }
+    }
+    $identity = @($bridge, $torch, $cuda, $gpu) -join "|"
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $fingerprint = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity))).Replace("-", "").Substring(0, 16).ToLowerInvariant()
+    } finally { $sha.Dispose() }
+    $namespace = "v1-$SelectedRifeBackend-$version-$SelectedRifePrecision-$fingerprint"
+    $profile = [ordered]@{
+        backend = $SelectedRifeBackend; version = $version; precision = $SelectedRifePrecision
+        bridge = $bridge; torch = $torch; cuda = $cuda; gpu = $gpu; namespace = $namespace
+    }
+    Write-Utf8NoBom -Path $RifeProfilePath -Value ($profile | ConvertTo-Json)
+    Write-Step "RIFE backend $SelectedRifeBackend $version / $SelectedRifePrecision (Torch-TensorRT $bridge)"
+}
+
+function Install-RifeBackendPackages {
+    param([string]$PythonExe)
+    $installed = Read-RifeBackendProfile
+    if (Test-TensorRtPackages $PythonExe) {
+        Update-VsrifeTensorRtPrecision
+        if (($SelectedRifeBackend -eq "rtx" -and $installed.backend -ne "rtx") -or
+            ($installed -and $installed.precision -ne $SelectedRifePrecision)) {
+            Test-RifeBackendInference $PythonExe
+        }
+        Write-RifeBackendProfile $PythonExe
+        return
+    }
+
+    # Both distributions install torch_tensorrt into the same path. Stage the
+    # replacement so pip or GPU self-test failure leaves the original intact.
+    $original = $PythonDir
+    $stage = Join-Path $PortableDir ("_python-stage-" + [Guid]::NewGuid().ToString("N"))
+    $backup = "$stage-backup"
+    $committed = $false
+    $previousProfile = if (Test-Path $RifeProfilePath) { Read-Utf8Text $RifeProfilePath }
+    Write-Step "Staging mutually exclusive RIFE backend: $SelectedRifeBackend"
+    try {
+        Copy-Item -LiteralPath $original -Destination $stage -Recurse -Force
+        $script:PythonDir = $stage
+        $stagedExe = Join-Path $stage "python.exe"
+        Set-PortablePythonEnvironment
+        $packages = & $stagedExe -c "import importlib.metadata as m; print('\n'.join(d.metadata['Name'] for d in m.distributions() if (d.metadata['Name'] or '').lower().replace('_','-').startswith(('tensorrt', 'torch-tensorrt'))))"
+        if ($LASTEXITCODE -ne 0) { throw "Could not enumerate installed TensorRT packages." }
+        $packages = @($packages | Where-Object { $_ })
+        if ($packages.Count) {
+            Invoke-Logged $stagedExe (@("-m", "pip", "uninstall", "-y") + $packages)
+        }
+        if ($SelectedRifeBackend -ne "torch") {
+            $runtime, $version = if ($SelectedRifeBackend -eq "rtx") { "tensorrt-rtx", $TensorRtRtxVersion }
+                else { "tensorrt", $TensorRtVersion }
+            $args = @("-m", "pip", "install", "--extra-index-url", $PyTorchCudaIndex, "--extra-index-url", $NvidiaPipIndex,
+                "$runtime==$version", "${runtime}-cu13==$version", "${runtime}-cu13-bindings==$version",
+                "${runtime}-cu13-libs==$version", "torch-${runtime}==$TorchTensorRtVersion", "torch==$TorchVersion+cu130")
+            if ($SkipDownloads) { $args += @("--no-index", "--find-links", ('"{0}"' -f $DownloadsDir)) }
+            Invoke-Logged $stagedExe $args
+        }
+        if (-not (Test-TensorRtPackages $stagedExe -ShowOutput)) {
+            throw "TensorRT package isolation/import check failed for $SelectedRifeBackend."
+        }
+        Invoke-Logged $stagedExe @("-m", "pip", "check")
+        Update-VsrifeTensorRtPrecision
+        Ensure-RifeModels
+        Test-RifeBackendInference $stagedExe
+
+        [IO.Directory]::Move($original, $backup)
+        try {
+            [IO.Directory]::Move($stage, $original)
+            $script:PythonDir = $original
+            Set-PortablePythonEnvironment
+            Write-RifeBackendProfile $PythonExe
+            $committed = $true
+        } catch {
+            if (Test-Path -LiteralPath $original) { [IO.Directory]::Move($original, $stage) }
+            [IO.Directory]::Move($backup, $original)
+            if ($null -ne $previousProfile) { Write-Utf8NoBom -Path $RifeProfilePath -Value $previousProfile }
+            throw
+        }
+    } finally {
+        $script:PythonDir = $original
+        Set-PortablePythonEnvironment
+        foreach ($path in @($stage, $backup)) {
+            if (Test-Path -LiteralPath $path) {
+                $item = Get-Item -LiteralPath $path -Force
+                if ($item.Parent.FullName -eq $PortableDir -and
+                    -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+                    ($path -ne $backup -or $committed)) {
+                    Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
 }
 
 function Install-PythonPackages {
@@ -746,17 +898,10 @@ function Install-PythonPackages {
         throw "Portable Python is missing: $pythonExe"
     }
 
-    if ((Test-CorePythonPackages $pythonExe) -and (Test-CudaTorch $pythonExe) -and (Test-TensorRtPackages $pythonExe)) {
-        Write-Step "Python package stack already works"
-        return
-    }
-
-    Write-Step "Installing Python packages into portable Python"
-    Invoke-Logged $pythonExe @("-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools<82")
-
     if (Test-CorePythonPackages $pythonExe) {
         Write-Step "Core Python packages already present"
     } else {
+        Invoke-Logged $pythonExe @("-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools<82")
         $packages = @(
             "jellyfin-mpv-shim[gui]==$ShimVersion",
             "jellyfin-apiclient-python==$JellyfinApiClientVersion",
@@ -789,23 +934,7 @@ function Install-PythonPackages {
         )
     }
 
-    if (Test-TensorRtPackages $pythonExe) {
-        Write-Step "TensorRT packages already present"
-    } else {
-        Write-Step "Installing TensorRT packages"
-        try {
-            Invoke-Logged $pythonExe @(
-                "-m", "pip", "install",
-                "--extra-index-url", $PyTorchCudaIndex,
-                "--extra-index-url", $NvidiaPipIndex,
-                "tensorrt==$TensorRtVersion",
-                "torch_tensorrt==$TorchTensorRtVersion"
-            )
-        } catch {
-            Write-Warn "TensorRT package install failed. RIFE config requests trt=True, so test-rife may fail until TensorRT wheels are available for this Python/CUDA combination."
-            Write-Warn $_.Exception.Message
-        }
-    }
+    Install-RifeBackendPackages $pythonExe
 }
 
 function Install-ShimFonts {
@@ -1379,7 +1508,7 @@ set VSSCRIPT_PATH=%PY%\Lib\site-packages\vapoursynth\vsscript.dll
 set DANMAKU_CACHE_DIR=%ROOT%\config\cache\danmaku
 set RIFE_TRT_CACHE_DIR=%ROOT%\config\cache\rife-trt
 set MPV_HOME=%CFG%
-set PATH=%PY%;%PY%\Scripts;%PY%\Lib\site-packages;%PY%\Lib\site-packages\vapoursynth;%PY%\Lib\site-packages\torch\lib;%PY%\Lib\site-packages\torch_tensorrt\lib;%PY%\Lib\site-packages\tensorrt_libs;%PATH%
+set PATH=%PY%;%PY%\Scripts;%PY%\Lib\site-packages;%PY%\Lib\site-packages\vapoursynth;%PY%\Lib\site-packages\torch\lib;%PY%\Lib\site-packages\torch_tensorrt\lib;%PY%\Lib\site-packages\tensorrt_libs;%PY%\Lib\site-packages\tensorrt_rtx_libs;%PATH%
 start "" "%MPV%" --config-dir="%CFG%" %*
 "@
 
@@ -1591,7 +1720,7 @@ try {
     $env:PYTHONUTF8 = "1"
     $env:PYTHONIOENCODING = "utf-8"
     $env:VSSCRIPT_PATH = Join-Path $PythonDir "Lib\site-packages\vapoursynth\vsscript.dll"
-    $env:PATH = "$PythonDir;$(Join-Path $PythonDir 'Scripts');$(Join-Path $PythonDir 'Lib\site-packages');$(Join-Path $PythonDir 'Lib\site-packages\vapoursynth');$(Join-Path $PythonDir 'Lib\site-packages\torch\lib');$(Join-Path $PythonDir 'Lib\site-packages\torch_tensorrt\lib');$(Join-Path $PythonDir 'Lib\site-packages\tensorrt_libs');$env:PATH"
+    $env:PATH = "$PythonDir;$(Join-Path $PythonDir 'Scripts');$(Join-Path $PythonDir 'Lib\site-packages');$(Join-Path $PythonDir 'Lib\site-packages\vapoursynth');$(Join-Path $PythonDir 'Lib\site-packages\torch\lib');$(Join-Path $PythonDir 'Lib\site-packages\torch_tensorrt\lib');$(Join-Path $PythonDir 'Lib\site-packages\tensorrt_libs');$(Join-Path $PythonDir 'Lib\site-packages\tensorrt_rtx_libs');$env:PATH"
     $env:MPV_HOME = $MpvConfigDir
     $env:DANMAKU_CACHE_DIR = Join-Path $CacheDir "danmaku"
     $env:RIFE_TRT_CACHE_DIR = Join-Path $CacheDir "rife-trt"
@@ -2038,40 +2167,6 @@ function Cleanup-ObsoleteConfig {
         Set-RuntimeConfigValues $runtimeUpdates
     }
 
-    $trtCacheDir = Join-Path $CacheDir "rife-trt"
-    $removedStaleEngines = $false
-    if (Test-Path $trtCacheDir) {
-        foreach ($file in Get-ChildItem -LiteralPath $trtCacheDir -File -Force) {
-            $match = [Regex]::Match($file.Name, '_trt-(?<version>[^_]+)\.ts(?:\.encode)?$')
-            if ($match.Success -and $match.Groups["version"].Value -ne $TensorRtVersion) {
-                if ($DryRun) {
-                    Write-Host "DRY-RUN: remove stale TensorRT cache $($file.FullName)"
-                } else {
-                    Remove-Item -LiteralPath $file.FullName -Force
-                }
-                $removedStaleEngines = $true
-            }
-        }
-
-        foreach ($log in Get-ChildItem -LiteralPath $trtCacheDir -File -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '\.build(?:\.err)?\.log$' }) {
-            if (-not $DryRun) {
-                Remove-Item -LiteralPath $log.FullName -Force
-            }
-        }
-
-        if ($removedStaleEngines) {
-            Write-Step "Removed TensorRT engine caches from versions older than $TensorRtVersion"
-            $validationDir = Join-Path $trtCacheDir ".validated"
-            if (Test-Path $validationDir) {
-                if ($DryRun) {
-                    Write-Host "DRY-RUN: remove stale TensorRT validation markers $validationDir"
-                } else {
-                    Remove-Item -LiteralPath $validationDir -Recurse -Force
-                }
-            }
-        }
-    }
 }
 
 function Remove-StaleMpvVapourSynthDlls {
@@ -2145,45 +2240,6 @@ function Configure-VapourSynthPython {
     }
 }
 
-function New-RifePrecompileSample {
-    param(
-        [int]$Width,
-        [int]$Height
-    )
-
-    $ffmpegExe = Join-Path $ToolsDir "ffmpeg.exe"
-    if (-not (Test-Path $ffmpegExe)) {
-        throw "ffmpeg.exe is missing. Run install first."
-    }
-
-    $sampleDir = Join-Path $CacheDir "precompile"
-    Ensure-Directory $sampleDir
-    $samplePath = Join-Path $sampleDir ("rife-precompile-{0}x{1}.mp4" -f $Width, $Height)
-    if (Test-Path $samplePath) {
-        return $samplePath
-    }
-
-    Write-Step ("Generating synthetic RIFE precompile sample {0}x{1}" -f $Width, $Height)
-    if ($DryRun) {
-        Write-Host "DRY-RUN: generate $samplePath"
-        return $samplePath
-    }
-
-    Invoke-Logged $ffmpegExe @(
-        "-hide_banner",
-        "-loglevel", "error",
-        "-y",
-        "-f", "lavfi",
-        "-i", ("testsrc2=size={0}x{1}:rate=30:duration=0.2" -f $Width, $Height),
-        "-frames:v", "6",
-        "-an",
-        "-pix_fmt", "yuv420p",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        $samplePath
-    )
-    return $samplePath
-}
 
 function New-RifeRenderBenchmarkSample {
     param(
@@ -2226,132 +2282,37 @@ function New-RifeRenderBenchmarkSample {
     return $samplePath
 }
 
-function Invoke-MpvRifePrecompile {
-    param(
-        [string]$SamplePath,
-        [string]$VpyName,
-        [string]$Label
-    )
-
-    $mpvCli = Join-Path $MpvDir "mpv.com"
-    if (-not (Test-Path $mpvCli)) {
-        throw "mpv.com is missing. Run install first."
-    }
-
-    Write-Step "Precompiling RIFE TensorRT engine: $Label / $VpyName"
-    if ($DryRun) {
-        Write-Host "DRY-RUN: mpv precompile $Label with $VpyName"
-        return
-    }
-
-    Ensure-Directory $LogsDir
-    $precompileConfigDir = Join-Path $CacheDir "precompile-mpv-config"
-    Ensure-Directory $precompileConfigDir
-    $trtCacheForVpy = (Join-Path $CacheDir "rife-trt").Replace("\", "/")
-    foreach ($name in @(
-        "rife-4.26.vpy",
-        "rife-4.26-x2.vpy",
-        "rife-4.26-x3.vpy",
-        "rife-4.26-x4.vpy",
-        "rife-4.26-half-x2.vpy",
-        "rife-4.26-down1080-x2.vpy",
-        "rife-4.26-down1080-x3.vpy",
-        "rife-4.26-down1080-x4.vpy"
-    )) {
-        $src = Join-Path $MpvConfigDir $name
-        $dst = Join-Path $precompileConfigDir $name
-        if ((Test-Path $src) -and -not $DryRun) {
-            $vpyContent = Get-Content -LiteralPath $src -Raw
-            $vpyContent = $vpyContent -replace 'trt_cache_dir\s*=\s*Path\(__file__\)\.resolve\(\)\.parents\[1\]\s*/\s*"cache"\s*/\s*"rife-trt"', "trt_cache_dir = Path(r'$trtCacheForVpy')"
-            Set-Content -LiteralPath $dst -Value $vpyContent -Encoding UTF8
-        }
-    }
-    $helperSource = Join-Path $MpvConfigDir "vs_gpu_helpers.py"
-    if ((Test-Path $helperSource) -and -not $DryRun) {
-        Copy-Item -LiteralPath $helperSource -Destination (Join-Path $precompileConfigDir "vs_gpu_helpers.py") -Force
-    }
-    $commonSource = Join-Path $MpvConfigDir "rife_vpy_common.py"
-    if ((Test-Path $commonSource) -and -not $DryRun) {
-        Copy-Item -LiteralPath $commonSource -Destination (Join-Path $precompileConfigDir "rife_vpy_common.py") -Force
-    }
-    $stdoutPath = Join-Path $LogsDir ("rife-precompile-" + [Guid]::NewGuid().ToString("N") + ".out.log")
-    $stderrPath = Join-Path $LogsDir ("rife-precompile-" + [Guid]::NewGuid().ToString("N") + ".err.log")
-    Set-PortablePythonEnvironment
-    $previousInlineTrtBuild = $env:RIFE_ALLOW_INLINE_TRT_BUILD
-    $env:RIFE_TRT_CACHE_DIR = (Join-Path $CacheDir "rife-trt")
-    $env:RIFE_ALLOW_INLINE_TRT_BUILD = "1"
-    try {
-        $args = @(
-            "--config-dir=$precompileConfigDir",
-            "--load-scripts=no",
-            "--vo=null",
-            "--ao=null",
-            "--frames=3",
-            "--msg-level=all=v",
-            "--vf=vapoursynth=file=~~/$VpyName",
-            $SamplePath
-        )
-
-        $p = Start-Process -FilePath $mpvCli -ArgumentList $args -WorkingDirectory $ProjectRoot -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-        $output = ""
-        if (Test-Path $stdoutPath) {
-            $output += Get-Content -LiteralPath $stdoutPath -Raw
-        }
-        if (Test-Path $stderrPath) {
-            $output += Get-Content -LiteralPath $stderrPath -Raw
-        }
-        if (($p.ExitCode -ne 0) -or ($output -match "Script evaluation failed|Disabling filter vapoursynth|could not init VS")) {
-            Write-Warn "RIFE TensorRT precompile failed. Logs kept for inspection:"
-            Write-Warn $stdoutPath
-            Write-Warn $stderrPath
-            throw "RIFE TensorRT precompile failed for $Label / $VpyName"
-        }
-    } finally {
-        if ($null -eq $previousInlineTrtBuild) {
-            Remove-Item Env:\RIFE_ALLOW_INLINE_TRT_BUILD -ErrorAction SilentlyContinue
-        } else {
-            $env:RIFE_ALLOW_INLINE_TRT_BUILD = $previousInlineTrtBuild
-        }
-    }
-
-    Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
-}
-
 function Precompile-RifeTensorRtEngines {
-    if ($SkipRifeTrtPrecompile) {
+    if ($SkipRifeTrtPrecompile -or $SelectedRifeBackend -eq "torch") {
         Write-Step "Skipping RIFE TensorRT precompile"
         return
     }
-
-    Write-Step "Precompiling common RIFE TensorRT engines"
-    Remove-Item -LiteralPath (Join-Path $CacheDir "cache") -Recurse -Force -ErrorAction SilentlyContinue
-    $resolutions = @(
-        @{ Label = "720p"; Width = 1280; Height = 720 },
-        @{ Label = "1080p"; Width = 1920; Height = 1080 },
-        @{ Label = "4K"; Width = 3840; Height = 2160 }
-    )
-
-    $vpyFiles = @(
-        "rife-4.26-x2.vpy",
-        "rife-4.26-x3.vpy",
-        "rife-4.26-x4.vpy",
-        "rife-4.26-half-x2.vpy"
-    )
-    if ($EnableDownsampled4kVsr) {
-        $vpyFiles += @(
-            "rife-4.26-down1080-x2.vpy",
-            "rife-4.26-down1080-x3.vpy",
-            "rife-4.26-down1080-x4.vpy"
-        )
-    }
-    foreach ($resolution in $resolutions) {
-        $sample = New-RifePrecompileSample $resolution.Width $resolution.Height
-        foreach ($vpy in $vpyFiles) {
-            if (($vpy -match "down1080") -and ($resolution.Height -le 1080)) {
-                continue
+    Write-Step "Precompiling common RIFE engines ($SelectedRifeBackend / $SelectedRifePrecision)"
+    if ($DryRun) { return }
+    $profile = Read-RifeBackendProfile
+    $root = Join-Path $CacheDir "rife-trt"
+    $pythonExe = Join-Path $PythonDir "python.exe"
+    $builder = Join-Path $MpvConfigDir "rife_trt_build_cache.py"
+    Set-PortablePythonEnvironment
+    foreach ($size in @("1280x720", "1920x1080", "3840x2160")) {
+        $width, $height = $size -split "x"
+        $cases = @(@{ Label = "4.26"; Scale = "1" }, @{ Label = "4.26-half"; Scale = "0.5" })
+        if ($EnableDownsampled4kVsr -and $height -eq "2160") {
+            $cases += @{ Label = "4.26-down1080"; Scale = "1"; Downsample = $true }
+        }
+        foreach ($case in $cases) {
+            $effectiveSize = if ($case.Downsample) { "1920x1080" } else { $size }
+            $key = "$($case.Label)-scale-$($case.Scale)-$effectiveSize"
+            $args = @(('"{0}"' -f $builder), "--width", $width, "--height", $height, "--scale", $case.Scale,
+                "--config-dir", ('"{0}"' -f $MpvConfigDir), "--cache-dir", ('"{0}"' -f $root), "--namespace", $profile.namespace)
+            if ($case.Downsample) { $args += "--downsample-1080" }
+            Write-Step "Validating RIFE cache: $key"
+            try {
+                # Factor is not part of the engine ABI; x2 warms the same engine used by x3/x4.
+                Invoke-Logged $pythonExe $args
+            } catch {
+                Write-Warn "RIFE $key failed for $($profile.namespace); see the build logs in $root. Playback remains available."
             }
-            Invoke-MpvRifePrecompile $sample $vpy $resolution.Label
         }
     }
 }
@@ -2600,48 +2561,33 @@ function Invoke-RifeRuntimeBenchmarkCase {
     }
 
     $scriptPath = Join-Path $CacheDir ("rife-benchmark-" + [Guid]::NewGuid().ToString("N") + ".py")
-    $cachePath = (Join-Path $CacheDir "rife-trt").Replace("\", "/")
-    $mpvConfigPath = $MpvConfigDir.Replace("\", "\\")
+    $mpvConfigPath = ConvertTo-Json -InputObject $MpvConfigDir -Compress
     $useGpuYuvPy = if ($UseGpuYuv) { "True" } else { "False" }
     $downsamplePy = if ($DownsampleTo1080) { "True" } else { "False" }
     $code = @"
 import json
 import statistics
 import time
-from pathlib import Path
 import sys
 
 import vapoursynth as vs
-from vsrife import rife
 
-sys.path.insert(0, r"$mpvConfigPath")
+sys.path.insert(0, $mpvConfigPath)
+from rife_backend import profile
+from rife_vpy_common import _cpu_rife, run_rife_profile
+
+info = profile()
 core = vs.core
-cache = Path(r"$cachePath")
-cache.mkdir(parents=True, exist_ok=True)
-
-clip = core.std.BlankClip(width=$Width, height=$Height, format=vs.YUV420P10, length=320, fpsnum=24, fpsden=1, color=[512, 512, 512])
-if ${downsamplePy}:
-    from vs_gpu_helpers import downsample_yuvp10_gpu
-    target_h = 1080
-    target_w = ((clip.width * target_h) // clip.height) & ~1
-    clip = downsample_yuvp10_gpu(clip, width=target_w, height=target_h)
+base = core.std.BlankClip(width=$Width, height=$Height, format=vs.YUV420P10, length=1, fpsnum=24, fpsden=1, color=[512, 512, 512])
+base = core.std.SetFrameProps(base, _Matrix=1, _ColorRange=1)
+clip = (base + core.std.BlankClip(base, color=[544, 512, 512], keep=True)) * 160
+args = dict(model="$Model", scale=$Scale, factor_num=$Factor, factor_den=1)
 
 if ${useGpuYuvPy}:
-    from vs_gpu_helpers import rife_yuv
-    clip = rife_yuv(clip, model="$Model", scale=$Scale, factor_num=$Factor, factor_den=1)
+    clip = run_rife_profile(clip, downsample_1080=${downsamplePy}, strict=True, **args)
 else:
-    clip = core.resize.Bicubic(clip, format=vs.RGBH, matrix_in_s="709")
-    clip = rife(
-        clip,
-        model="$Model",
-        scale=$Scale,
-        factor_num=$Factor,
-        factor_den=1,
-        auto_download=False,
-        trt=True,
-        trt_cache_dir=str(cache),
-    )
-    clip = core.resize.Bicubic(clip, format=vs.YUV420P10, matrix_s="709")
+    width = (($Width * 1080) // $Height) & ~1 if ${downsamplePy} else None
+    clip = _cpu_rife(clip, width=width, height=1080 if width else None, **args)
 
 for group in range(8):
     base = group * $Factor
@@ -2668,6 +2614,9 @@ for group in range(8, 32):
 ordered = sorted(samples)
 p99 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.99))]
 print(json.dumps({
+    "backend": info["backend"],
+    "backend_version": info["version"],
+    "precision": info["precision"],
     "width": $Width,
     "height": $Height,
     "factor": $Factor,
@@ -2796,28 +2745,36 @@ function Invoke-RifeRenderBenchmarkCase {
 local utils = require("mp.utils")
 local msg = require("mp.msg")
 local emitted = false
+local data = {}
 
 local function nprop(name)
     return mp.get_property_number(name, 0) or 0
 end
 
-local function emit_stats()
-    if emitted then return end
-    emitted = true
-    local data = {
-        frame_drop_count = nprop("frame-drop-count"),
-        mistimed_frame_count = nprop("mistimed-frame-count"),
-        vo_delayed_frame_count = nprop("vo-delayed-frame-count"),
+local function sample_stats()
+    local pos = nprop("time-pos")
+    if pos <= 0 or pos < (data.time_pos or 0) then return end
+    data = {
+        time_pos = pos,
+        frame_drop_count = math.max(nprop("frame-drop-count"), data.frame_drop_count or 0),
+        mistimed_frame_count = math.max(nprop("mistimed-frame-count"), data.mistimed_frame_count or 0),
+        vo_delayed_frame_count = math.max(nprop("vo-delayed-frame-count"), data.vo_delayed_frame_count or 0),
         display_fps = nprop("display-fps"),
         estimated_vf_fps = nprop("estimated-vf-fps"),
         container_fps = nprop("container-fps"),
     }
+end
+
+local function emit_stats()
+    if emitted then return end
+    emitted = true
     local line = "RENDER_BENCH_JSON:" .. utils.format_json(data)
     msg.info(line)
     io.stderr:write(line .. "\n")
     io.stderr:flush()
 end
 
+mp.add_periodic_timer(0.1, sample_stats)
 mp.register_event("end-file", emit_stats)
 mp.register_event("shutdown", emit_stats)
 '@
@@ -2847,6 +2804,10 @@ mp.register_event("shutdown", emit_stats)
         "rife-4.26-down1080-x3.vpy",
         "rife-4.26-down1080-x4.vpy",
         "rife_vpy_common.py",
+        "rife_backend.py",
+        "rife-backend.json",
+        "runtime.conf",
+        "mpv.conf",
         "vs_gpu_helpers.py"
     )) {
         $src = Join-Path $MpvConfigDir $name
@@ -2893,14 +2854,19 @@ mp.register_event("shutdown", emit_stats)
         "--deband=yes",
         "--target-colorspace-hint=yes",
         "--dither-depth=auto",
-        "--msg-level=all=warn,cplayer=info,vf=info",
+        "--msg-level=all=warn,cplayer=info,vf=info,d3d11vpp=v",
         "--vf=$vf",
         $samplePath
     )
 
+    $keepLogs = $true
     try {
         $p = Start-Process -FilePath $mpvCli -ArgumentList $args -WorkingDirectory $renderConfigDir -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -WindowStyle Hidden
         if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+            # The Windows console launcher may own a separate mpv.exe.
+            Get-CimInstance Win32_Process -Filter "ParentProcessId = $($p.Id) AND Name = 'mpv.exe'" |
+                Where-Object ExecutablePath -eq (Join-Path $MpvDir "mpv.exe") |
+                ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
             return [pscustomobject]@{
                 frame_drop_count = 0
@@ -2928,15 +2894,27 @@ mp.register_event("shutdown", emit_stats)
         }
         $stats = (($jsonLine -replace '^RENDER_BENCH_JSON:', '') | ConvertFrom-Json)
         $badFrames = [int]$stats.frame_drop_count + [int]$stats.mistimed_frame_count + [int]$stats.vo_delayed_frame_count
+        $expectedFps = 24 * $Factor
+        $interpolationOk = [double]$stats.time_pos -ge ($DurationSeconds - 0.75) -and
+            [math]::Abs([double]$stats.estimated_vf_fps - $expectedFps) -le ($expectedFps * 0.05)
+        $filterFailed = $output -match 'Script evaluation failed|Disabling filter|could not init VS|Failed to load VapourSynth'
+        $vsrOk = -not $vsrScale -or [bool]($output -match 'NVIDIA RTX Super Resolution enabled')
         $stats | Add-Member -NotePropertyName bad_frame_count -NotePropertyValue $badFrames -Force
         $stats | Add-Member -NotePropertyName max_bad_frames -NotePropertyValue $maxBadFrames -Force
         $stats | Add-Member -NotePropertyName timed_out -NotePropertyValue $false -Force
         $stats | Add-Member -NotePropertyName timeout_seconds -NotePropertyValue $TimeoutSeconds -Force
-        $stats | Add-Member -NotePropertyName passed -NotePropertyValue ($badFrames -le $maxBadFrames) -Force
+        $stats | Add-Member -NotePropertyName interpolation_ok -NotePropertyValue $interpolationOk -Force
+        $stats | Add-Member -NotePropertyName vsr_ok -NotePropertyValue $vsrOk -Force
+        $stats | Add-Member -NotePropertyName passed -NotePropertyValue ($badFrames -le $maxBadFrames -and $interpolationOk -and $vsrOk -and -not $filterFailed) -Force
+        $keepLogs = -not $stats.passed
         return $stats
     } finally {
         Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+        if ($keepLogs) {
+            Write-Warn "Render benchmark logs: $stdoutPath / $stderrPath"
+        } else {
+            Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -2945,7 +2923,7 @@ function Measure-RifeRuntimeCapability {
         return
     }
 
-    Write-Step "Benchmarking local RIFE runtime capability"
+    Write-Step "Benchmarking local RIFE runtime capability ($SelectedRifeBackend / $SelectedRifePrecision)"
     $refreshInfo = Get-ConfiguredDisplayRefresh
     $refresh = [double]$refreshInfo.Refresh
     if ($refreshInfo.Width -and $refreshInfo.Height) {
@@ -2959,6 +2937,7 @@ function Measure-RifeRuntimeCapability {
         @{ Key = "max_factor_4k"; Label = "1080p<video<=4K"; Width = 3840; Height = 2160 }
     )
     $values = @{}
+    $measurements = @()
 
     foreach ($tier in $tiers) {
         $best = 0
@@ -2973,11 +2952,14 @@ function Measure-RifeRuntimeCapability {
                 continue
             }
             $result = Invoke-RifeRuntimeBenchmarkCase $tier.Width $tier.Height $factor "4.26" 1.0 -UseGpuYuv -DownsampleTo1080:$useDownsample4k -BudgetMs $sourceBudgetMs
+            $measurement = @{ Compute = $result; Downsample = $useDownsample4k }
+            $measurements += $measurement
             $labelModel = if ($useDownsample4k) { "4.26 down1080" } else { "4.26 gpu-yuv" }
             Write-Host ("{0} {1} x{2}: group-p99={3:n2}ms, source-budget={4:n2}ms" -f $tier.Label, $labelModel, $factor, [double]$result.group_p99_ms, $sourceBudgetMs)
             if ([double]$result.group_p99_ms -le $sourceBudgetMs) {
                 $renderModel = if ($useDownsample4k) { "4.26-down1080" } else { "4.26" }
                 $render = Invoke-RifeRenderBenchmarkCase $tier.Width $tier.Height $factor $renderModel -DownsampleTo1080:$useDownsample4k -RefreshInfo $refreshInfo
+                $measurement.Render = $render
                 $timeoutNote = if ($render.timed_out) { ", timeout>{0}s" -f [int]$render.timeout_seconds } else { "" }
                 Write-Host ("{0} render {1} x{2}: bad-frames={3}/{4} (drop={5}, mistimed={6}, delayed={7}{8})" -f $tier.Label, $renderModel, $factor, [int]$render.bad_frame_count, [int]$render.max_bad_frames, [int]$render.frame_drop_count, [int]$render.mistimed_frame_count, [int]$render.vo_delayed_frame_count, $timeoutNote)
                 if ($render.passed) {
@@ -2990,9 +2972,12 @@ function Measure-RifeRuntimeCapability {
         if ($best -lt 2) {
             if ($tier.Height -gt 1080 -and (24 * 2) -le ($refresh + 0.01)) {
                 $result = Invoke-RifeRuntimeBenchmarkCase $tier.Width $tier.Height 2 "4.26" 0.5 -UseGpuYuv -BudgetMs $sourceBudgetMs
+                $measurement = @{ Compute = $result; Downsample = $false }
+                $measurements += $measurement
                 Write-Host ("{0} 4.26 x2 scale=0.5 fallback: group-p99={1:n2}ms, source-budget={2:n2}ms" -f $tier.Label, [double]$result.group_p99_ms, $sourceBudgetMs)
                 if ([double]$result.group_p99_ms -le $sourceBudgetMs) {
                     $render = Invoke-RifeRenderBenchmarkCase $tier.Width $tier.Height 2 "4.26-half" -RefreshInfo $refreshInfo
+                    $measurement.Render = $render
                     $timeoutNote = if ($render.timed_out) { ", timeout>{0}s" -f [int]$render.timeout_seconds } else { "" }
                     Write-Host ("{0} render 4.26-half x2: bad-frames={1}/{2} (drop={3}, mistimed={4}, delayed={5}{6})" -f $tier.Label, [int]$render.bad_frame_count, [int]$render.max_bad_frames, [int]$render.frame_drop_count, [int]$render.mistimed_frame_count, [int]$render.vo_delayed_frame_count, $timeoutNote)
                     if ($render.passed) {
@@ -3014,6 +2999,11 @@ function Measure-RifeRuntimeCapability {
     }
 
     Set-RuntimeConfigValues $values
+    if (-not $DryRun) {
+        $profile = Read-RifeBackendProfile
+        $report = @{ Profile = $profile; Display = $refreshInfo; Measurements = $measurements; RuntimeConfig = $values }
+        Write-Utf8NoBom -Path (Join-Path $LogsDir ("rife-benchmark-" + $profile.namespace + ".json")) -Value ($report | ConvertTo-Json -Depth 10)
+    }
 }
 
 function Set-PortablePythonEnvironment {
@@ -3023,7 +3013,7 @@ function Set-PortablePythonEnvironment {
         $env:PYTHONPATH = Join-Path $PythonDir "Lib\site-packages"
         $env:VSSCRIPT_PATH = Join-Path $PythonDir "Lib\site-packages\vapoursynth\vsscript.dll"
         $env:RIFE_TRT_CACHE_DIR = Join-Path $CacheDir "rife-trt"
-        $env:PATH = "$PythonDir;$(Join-Path $PythonDir 'Scripts');$(Join-Path $PythonDir 'Lib\site-packages');$(Join-Path $PythonDir 'Lib\site-packages\vapoursynth');$(Join-Path $PythonDir 'Lib\site-packages\torch\lib');$(Join-Path $PythonDir 'Lib\site-packages\torch_tensorrt\lib');$(Join-Path $PythonDir 'Lib\site-packages\tensorrt_libs');$env:PATH"
+        $env:PATH = "$PythonDir;$(Join-Path $PythonDir 'Scripts');$(Join-Path $PythonDir 'Lib\site-packages');$(Join-Path $PythonDir 'Lib\site-packages\vapoursynth');$(Join-Path $PythonDir 'Lib\site-packages\torch\lib');$(Join-Path $PythonDir 'Lib\site-packages\torch_tensorrt\lib');$(Join-Path $PythonDir 'Lib\site-packages\tensorrt_libs');$(Join-Path $PythonDir 'Lib\site-packages\tensorrt_rtx_libs');$OriginalPath"
     }
 }
 
@@ -3100,7 +3090,9 @@ function Test-All {
     $pythonExe = Join-Path $PythonDir "python.exe"
     Set-PortablePythonEnvironment
     Invoke-Logged $pythonExe @("-m", "pip", "check")
-    $ok = Test-PythonModule $pythonExe "import torch, torch_tensorrt, tensorrt, vapoursynth, vsrife`ntorch.ones(1, device='cuda')`nprint('python cuda/vapoursynth/rife ok')" -ShowOutput
+    $profile = Read-RifeBackendProfile
+    $script:SelectedRifeBackend = $profile.backend
+    $ok = (Test-TensorRtPackages $pythonExe -ShowOutput) -and (Test-CudaTorch $pythonExe -ShowOutput)
     if (-not $ok) {
         throw "Python CUDA/VapourSynth/RIFE import test failed."
     }
@@ -3141,18 +3133,22 @@ function Remove-StartupShortcut {
 
 function Install-All {
     Migrate-LegacyLayout
+    if (-not $DryRun) {
+        $active = Get-Process mpv, python, pythonw, vspipe -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -and $_.Path.StartsWith("$PortableDir\", [StringComparison]::OrdinalIgnoreCase) }
+        if ($active) { throw "Close portable mpv and run stop-shim before installing. Wait for any RIFE background build to finish." }
+    }
     Initialize-Layout
+    Select-RifeBackend
+    Install-Python
+    Install-PythonPackages
     Initialize-Config
     Update-MpvRuntimePolicyConfig
     Test-NvidiaVideoSuperResolution
-    Configure-RifeTensorRtForGpu
-    Install-Python
     Install-Mpv
     Install-Ffmpeg
-    Install-PythonPackages
     Install-ShimFonts
     Install-KrigChromaExtension
-    Update-VsrifeTensorRtPrecision
     Ensure-RifeModels
     Install-Danmaku
     Update-DanmakuShim3Compatibility
@@ -3178,6 +3174,10 @@ function Install-All {
 }
 
 function Show-Status {
+    $profile = Read-RifeBackendProfile
+    if ($profile) {
+        Write-Host "RIFE backend: $($profile.backend) $($profile.version) / $($profile.precision) (Torch-TensorRT $($profile.bridge))"
+    }
     Migrate-LegacyLayout
     Initialize-Layout
     Test-NvidiaVideoSuperResolution

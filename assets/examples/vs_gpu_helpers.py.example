@@ -313,15 +313,13 @@ def _detect_matrix(clip: vs.VideoNode) -> str:
 def _vsrife_engine_paths(model: str, ph: int, pw: int, scale: float,
                          fp16: bool, device: torch.device) -> tuple[Path, Path | None]:
     """Reproduce vsrife's cached-engine filename. Returns (flownet, encode_or_none)."""
-    import vsrife
-    import tensorrt
-    cache_override = os.environ.get("RIFE_TRT_CACHE_DIR")
-    model_dir = Path(cache_override) if cache_override else Path(vsrife.__file__).parent / "models"
-    model_dir.mkdir(parents=True, exist_ok=True)
+    from rife_backend import cache_dir, profile
+
+    model_dir = cache_dir()
     gpu_name = torch.cuda.get_device_name(device)
     base = (f"flownet_v{model}.pkl_{pw}x{ph}"
             f"_{'fp16' if fp16 else 'fp32'}_scale-{scale}"
-            f"_ensemble-False_{gpu_name}_trt-{tensorrt.__version__}.ts")
+            f"_ensemble-False_{gpu_name}_trt-{profile()['version']}.ts")
     flow = model_dir / base
     enc = model_dir / (base + ".encode")
     return flow, (enc if enc.exists() else None)
@@ -362,9 +360,7 @@ def _ensure_engines(model: str, h: int, w: int, scale: float,
         raise vs.Error(f"rife_yuv: TensorRT cache is missing: {missing}")
 
     if missing_engine:
-        cache_override = os.environ.get("RIFE_TRT_CACHE_DIR")
-        model_dir = Path(cache_override) if cache_override else flow_path.parent
-        model_dir.mkdir(parents=True, exist_ok=True)
+        model_dir = flow_path.parent
         # Trigger build via vsrife on a dummy 1-frame clip at the right
         # native resolution. vsrife's static-shape mode bakes the engine
         # to (pw, ph) and writes it to its cache dir.
@@ -402,6 +398,8 @@ def _load_engines(model: str, h: int, w: int, scale: float,
         if cached is not None:
             return cached
 
+        from rife_backend import profile
+        profile()
         # Make sure torch_tensorrt is imported so the custom op class
         # loads before torch.jit.load() of the .ts file.
         import torch_tensorrt  # noqa: F401
@@ -499,7 +497,11 @@ def rife_yuv(
     # and `clip.get_frame(0).props["_Matrix"]` would trigger one. We
     # read `_Matrix` per frame inside the ModifyFrame callbacks below.
     device = torch.device("cuda", device_index)
-    fp16 = True   # we always feed fp16 RGB to the engine
+    from rife_backend import profile
+
+    scale = float(scale)
+    fp16 = profile()["precision"] == "mixed"
+    rgb_dtype = torch.float16 if fp16 else torch.float32
     source_subsampling_w = clip.format.subsampling_w
     source_subsampling_h = clip.format.subsampling_h
     output_formats = {
@@ -641,7 +643,7 @@ def rife_yuv(
                 rgb = yuvp10_to_rgb(yp, up, vp, matrix,
                                     color_range=frame_range,
                                     chroma_upsample=chroma_upsample,
-                                    out_dtype=torch.float16)
+                                    out_dtype=rgb_dtype)
                 if need_pad:
                     rgb = F.pad(rgb, padding)
                 stream_io.synchronize()
@@ -714,7 +716,7 @@ def rife_yuv(
             img1, f1, _ = _cache_get(real_n_next)
 
         timestep = torch.full([1, 1, ph, pw], t,
-                               dtype=torch.float16, device=device)
+                               dtype=rgb_dtype, device=device)
 
         with lock_inf, torch.cuda.stream(stream_inf):
             if has_head:
@@ -723,6 +725,10 @@ def rife_yuv(
             else:
                 out = flownet(img0, img1, timestep, tenFlow_div,
                               backwarp_tenGrid)
+            if os.environ.get("RIFE_VALIDATE_OUTPUT") == "1":
+                low, high = torch.aminmax(out)
+                if not (-0.1 <= low.item() <= high.item() <= 1.1):
+                    raise vs.Error(f"RIFE engine output out of range: {low.item()}..{high.item()}")
             if need_pad:
                 out = out[:, :, :h, :w]
             # Use the color metadata the source frame came in with. Videos

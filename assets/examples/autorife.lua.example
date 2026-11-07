@@ -17,7 +17,6 @@ local last_cache_warning = ""
 local last_cache_warning_time = 0
 local pending_safe_switch = false
 local build_jobs = {}
-local validated_cache = {}
 local apply
 
 local function current_script_dir()
@@ -34,6 +33,24 @@ local script_dir = current_script_dir()
 local config_dir = utils.join_path(script_dir, "..")
 local portable_config_dir = script_dir:match("^(.*)[/\\]mpv[/\\]scripts$") or utils.join_path(config_dir, "..")
 local portable_dir = portable_config_dir:match("^(.*)[/\\]config$") or utils.join_path(portable_config_dir, "..")
+local backend
+do
+    local f = io.open(utils.join_path(config_dir, "rife-backend.json"), "rb")
+    if f then
+        backend = utils.parse_json(f:read("*a"))
+        f:close()
+    end
+    if type(backend) ~= "table" or type(backend.namespace) ~= "string"
+        or not backend.namespace:match("^v1%-%w[%w._%-]*$")
+        or (backend.backend ~= "standard" and backend.backend ~= "rtx" and backend.backend ~= "torch")
+        or (backend.precision ~= "mixed" and backend.precision ~= "fp32")
+        or type(backend.gpu) ~= "string" or type(backend.version) ~= "string" then
+        backend = nil
+        msg.error("RIFE backend profile missing or invalid; rerun install.ps1 install")
+    else
+        msg.info(string.format("RIFE backend: %s %s / %s", backend.backend, backend.version, backend.precision))
+    end
+end
 
 local function read_runtime_conf()
     local conf = {}
@@ -178,16 +195,16 @@ local function effective_dimensions_for_model(model)
     return source_width, source_height
 end
 
+local function cache_root_path()
+    return os.getenv("RIFE_TRT_CACHE_DIR") or utils.join_path(utils.join_path(portable_config_dir, "cache"), "rife-trt")
+end
+
 local function cache_dir_path()
-    return utils.join_path(utils.join_path(portable_config_dir, "cache"), "rife-trt")
+    return utils.join_path(cache_root_path(), backend.namespace)
 end
 
 local function validated_cache_dir_path()
     return utils.join_path(cache_dir_path(), ".validated")
-end
-
-local function fallback_model_cache_dir_path()
-    return utils.join_path(utils.join_path(utils.join_path(utils.join_path(utils.join_path(portable_dir, "python"), "Lib"), "site-packages"), "vsrife"), "models")
 end
 
 local function model_requires_encode(model)
@@ -195,6 +212,7 @@ local function model_requires_encode(model)
 end
 
 local function trt_cache_has_engine(model)
+    if not backend then return false, "invalid backend profile" end
     local widths, heights = cache_dimensions_for_model(model)
     if #widths == 0 or #heights == 0 then
         return false, "source dimensions are not available"
@@ -208,7 +226,7 @@ local function trt_cache_has_engine(model)
     local checked_any_dir = false
     local found_incomplete = false
     local requires_encode = model_requires_encode(model)
-    for _, cache_dir in ipairs({ cache_dir_path(), fallback_model_cache_dir_path() }) do
+    for _, cache_dir in ipairs({ cache_dir_path() }) do
         local files = utils.readdir(cache_dir, "files")
         if files then
             checked_any_dir = true
@@ -221,10 +239,12 @@ local function trt_cache_has_engine(model)
                     local dim_token = string.format("_%dx%d_", width, height)
                     for _, scale_token in ipairs(scale_tokens) do
                         for _, name in ipairs(files) do
-                            if name:match("%.ts$") and
+                            local suffix = "_ensemble-False_" .. backend.gpu .. "_trt-" .. backend.version .. ".ts"
+                            local precision = backend.precision == "mixed" and "_fp16_" or "_fp32_"
+                            if name:sub(-#suffix) == suffix and
                                 name:find("flownet_v4.26.pkl", 1, true) and
                                 name:find(dim_token, 1, true) and
-                                name:find(scale_token, 1, true) then
+                                name:find(precision .. scale_token .. "_", 1, true) then
                                 if (not requires_encode) or file_map[name .. ".encode"] then
                                     return true
                                 end
@@ -290,30 +310,8 @@ local function validation_marker_path(model)
     return utils.join_path(validated_cache_dir_path(), sanitize_filename(cache_profile_key(model)) .. ".ok")
 end
 
-local function cache_build_log_path(model)
-    return utils.join_path(cache_dir_path(), sanitize_filename(cache_profile_key(model)) .. ".build.log")
-end
-
-local function cache_build_err_path(model)
-    return utils.join_path(cache_dir_path(), sanitize_filename(cache_profile_key(model)) .. ".build.err.log")
-end
-
 local function cache_profile_validated(model)
-    if validated_cache[cache_profile_key(model)] then
-        return true
-    end
     return utils.file_info(validation_marker_path(model)) ~= nil
-end
-
-local function mark_cache_profile_validated(model)
-    local key = cache_profile_key(model)
-    validated_cache[key] = true
-    utils.subprocess({ args = { "cmd.exe", "/d", "/c", "mkdir", validated_cache_dir_path() }, cancellable = false })
-    local f = io.open(validation_marker_path(model), "w")
-    if f then
-        f:write(os.date("!%Y-%m-%dT%H:%M:%SZ"), "\n")
-        f:close()
-    end
 end
 
 local function stop_rife_before_cache_build(model)
@@ -361,6 +359,8 @@ local function start_background_cache_build(model, factor, reason)
     end
 
     build_jobs[key] = true
+    local failed_path = validation_marker_path(model) .. ".failed"
+    os.remove(failed_path)
     stop_rife_before_cache_build(model)
     msg.warn("RIFE TRT cache is not ready: " .. reason .. ". Building/validating in background.")
     mp.osd_message("Preparing RIFE TensorRT cache in background", 3.0)
@@ -369,6 +369,14 @@ local function start_background_cache_build(model, factor, reason)
     local poll_timer = nil
     local function poll_cache_ready()
         poll_count = poll_count + 1
+        if utils.file_info(failed_path) then
+            build_jobs[key] = nil
+            poll_timer:kill()
+            msg.error("RIFE " .. backend.namespace .. " cache validation failed: " .. key
+                .. "; see " .. cache_dir_path())
+            mp.osd_message("RIFE cache build failed; playing without interpolation", 4.0)
+            return
+        end
         if cache_profile_validated(model) then
             build_jobs[key] = nil
             active_factor = nil
@@ -401,7 +409,8 @@ local function start_background_cache_build(model, factor, reason)
         "--factor", tostring(factor),
         "--scale", tostring(profile_scale(model)),
         "--config-dir", config_dir,
-        "--cache-dir", cache_dir_path(),
+        "--cache-dir", cache_root_path(),
+        "--namespace", backend.namespace,
     }
     if profile_downsamples(model) then
         table.insert(args, "--downsample-1080")
@@ -536,7 +545,7 @@ local function choose_factor(conf)
 end
 
 apply = function()
-    if applying then return end
+    if applying or not backend then return end
     local conf = read_runtime_conf()
     local factor, model, reason = choose_factor(conf)
     local height = mp.get_property_native("height")
@@ -545,7 +554,7 @@ apply = function()
         return false
     end
 
-    if factor > 0 and height and height > 1080 and model == "4.26" then
+    if backend.backend ~= "torch" and factor > 0 and height and height > 1080 and model == "4.26" then
         local full_cache_ok, full_cache_reason = trt_cache_has_engine(model)
         if not full_cache_ok then
             model = "4.26-half"
@@ -561,7 +570,7 @@ apply = function()
         return true
     end
 
-    if factor > 0 and not bool_enabled(conf.allow_runtime_trt_build) then
+    if backend.backend ~= "torch" and factor > 0 and not bool_enabled(conf.allow_runtime_trt_build) then
         local cache_ok, cache_reason = trt_cache_has_engine(model)
         if not cache_ok then
             local build_mode = lower_or_default(conf.trt_cache_build, "background")
@@ -611,7 +620,7 @@ apply = function()
             end
         end
         msg.info(string.format("RIFE: %s x%d enabled (%s, buffered=%d, concurrent=%d)", model, factor, reason, buffered_frames, concurrent_frames))
-        mp.osd_message(string.format("RIFE: %s x%d", model, factor), 1.5)
+        mp.osd_message(string.format("RIFE: %s x%d [%s/%s]", model, factor, backend.backend, backend.precision), 1.5)
     else
         msg.info("RIFE: disabled (" .. reason .. ")")
         mp.osd_message("RIFE: off", 1.5)
@@ -677,7 +686,7 @@ local function cycle_manual_cap()
         end
     end
 
-    if target_factor and target_factor > 0 and not bool_enabled(conf.allow_runtime_trt_build) then
+    if backend and backend.backend ~= "torch" and target_factor and target_factor > 0 and not bool_enabled(conf.allow_runtime_trt_build) then
         local build_mode = lower_or_default(conf.trt_cache_build, "background")
         if build_mode == "background" then
             local cache_ok, cache_reason = trt_cache_has_engine(target_model)

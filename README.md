@@ -81,7 +81,7 @@ Generated launchers:
 
 The portable root keeps only double-click entry points; maintenance scripts live under `jellyfin-mpv-shim-portable/scripts/`. The installer prefers generating Start/taskbar-pinnable `.exe` launchers with the system .NET C# compiler; if the target machine has no compiler, it automatically falls back to `.bat` launchers. Windows 10/11 protects default-app selection, so the installer does not silently take over video file associations. To make this portable MPV the default player, run `scripts/register-mpv-file-association.bat`, then choose `MPV Portable` in Settings > Apps > Default apps, or right-click a video file and use Open with > Choose another app.
 
-The installer currently pins Jellyfin MPV Shim 3.3.0, Jellyfin API Client 1.21.0, python-mpv-jsonipc 1.5.0, VapourSynth R82, PyTorch 2.14.0 CUDA 13.0, Torch-TensorRT 2.14.0, TensorRT 11.1.0.106, and vsrife 5.7.0. The TensorRT pin follows Torch-TensorRT 2.14's `>=11.1,<11.2` constraint instead of blindly taking the newest PyPI release. mpv is pinned to a project-tested zhongfly Windows build tag; rerunning the installer upgrades an existing older mpv instead of downloading only when the executable is missing.
+The installer pins Jellyfin MPV Shim 3.3.0, Jellyfin API Client 1.21.0, python-mpv-jsonipc 1.5.0, VapourSynth R82, PyTorch 2.14.0 CUDA 13.0, and vsrife 5.7.0. The standard RIFE backend uses Torch-TensorRT 2.14.0 and TensorRT 11.1.0.106. mpv is pinned to a project-tested zhongfly Windows build tag; rerunning the installer upgrades an existing older mpv instead of downloading only when the executable is missing.
 
 Shim uses its `large` network-buffer preset by default (20 seconds, up to 400 MiB) to absorb short stalls from remote Jellyfin servers or reverse proxies. Its health-check interval uses the upstream 3.3 default of 300 seconds so a server returning repeated 502/503 responses does not keep the client in near-continuous failed requests. Both settings remain editable in the Shim UI.
 
@@ -116,7 +116,23 @@ The normal RIFE path prefers `vs_gpu_helpers.rife_yuv`, which keeps YUV/RGB conv
 
 This can make 4K 24fps x4 viable on the tested RTX 4080, but real frames also pass through the 1080p intermediate, so original 4K high-frequency detail is not preserved. It is disabled by default.
 
-RIFE uses TensorRT with a patched mixed-precision policy by default. The installer patches upstream `vsrife` so TensorRT uses `use_explicit_typing=False` plus `enabled_precisions={torch.float16, torch.float32}` instead of `use_explicit_typing=True`; this keeps FP16 throughput while allowing FP32 accumulation where TensorRT needs it, avoiding optical-flow overflow artifacts seen on fast motion and RTX 50-series / Blackwell systems.
+### RIFE Backend
+
+`auto` selects TensorRT-RTX mixed precision on detected RTX 50-series GPUs and standard TensorRT mixed precision on other GPUs unless a supported profile is already installed. On RTX 50-series, use FP32 for the standard TensorRT fallback. PyTorch CUDA is also available as a diagnostic fallback.
+
+Close mpv and stop Shim before switching:
+
+```powershell
+.\install.ps1 install -RifeTrtBackend rtx -RifePrecision mixed
+.\install.ps1 install -RifeTrtBackend standard -RifePrecision fp32
+.\install.ps1 install -RifeTrtBackend torch
+```
+
+`rtx` uses Torch-TensorRT-RTX 2.14.0 and TensorRT-RTX 1.6.1.120. Standard TensorRT mixed precision can corrupt interpolated frames on Blackwell. The second command selects standard TensorRT with FP32 inputs and TF32 disabled; the third uses PyTorch CUDA inference without TensorRT. `mixed` uses FP16 inputs and allows FP32 layers; it does not guarantee correct output with every engine.
+
+The installer tests a backend switch in a temporary Python copy before replacing the active runtime. Standard and RTX bindings are never installed together. `install.ps1 status` reports the active backend and precision; do not edit the generated `config/mpv/rife-backend.json` to switch. Engines and validation markers are separated under `config/cache/rife-trt/` by backend, versions, precision, and GPU. Unversioned legacy caches are ignored. The optional benchmark writes a separate JSON report for each profile under `config/logs/`; rerun it after switching to tune the frame-rate limits.
+
+For a Blackwell comparison only, explicitly run `install.ps1 install -RifeTrtBackend standard -RifePrecision mixed -AllowExperimentalBlackwellStandardMixed`. Stop if the install self-test fails or interpolated frames show artifacts. Compare the same clip and RIFE factor against RTX mixed and standard FP32, using newly built engines for each profile. The next automatic install switches this experimental profile back to RTX.
 
 During installation, the script also precompiles common RIFE TensorRT engines for 720p, 1080p, and 4K with the bundled full-resolution and fallback profiles. If `-EnableDownsampled4kVsr` is set, it also precompiles the downsampled 4K profiles. This avoids long TensorRT engine builds during playback. 4K engine builds can take several minutes even on high-end GPUs; use `-SkipRifeTrtPrecompile` only when you need a faster install and accept that uncached RIFE profiles will first play without interpolation while a low-priority background Python process builds the missing cache. If another RIFE filter is active when that happens, autorife removes it before launching the builder so TensorRT compilation does not compete with live RIFE inference. Once the cache is ready, press `F9` again to enable the requested RIFE mode. Inline TensorRT builds inside the active VapourSynth filter are still blocked because they can freeze or terminate mpv on Windows. Direct RIFE-to-RIFE hot switching is also guarded: when the current video already has a RIFE filter, pressing `F9` toward another active RIFE profile first removes the current filter and leaves playback running without RIFE; press `F9` again to apply the pending target profile. This extra step avoids the mpv/Python crashes seen when replacing a live VapourSynth TensorRT filter in-place.
 
@@ -216,5 +232,5 @@ The host must still provide the NVIDIA driver and enabled RTX Video Super Resolu
 - Successful installs clean `_downloads` and temporary extraction directories by default. Use `-KeepDownloads` while debugging installer issues.
 - Update this project and rerun `install.ps1 install` to install its latest tested danmaku revision.
 - The pinned danmaku revision includes the Shim 3 mpvtk compatibility fix: the right-edge danmaku icon claims the forced left-click binding only while hovered, so it remains clickable without blocking the Shim HUD elsewhere.
-- If interpolated frames are corrupted after an update, delete `jellyfin-mpv-shim-portable/config/cache/rife-trt/` and rerun `install.ps1 install` so TensorRT engines rebuild with the patched mixed-precision policy.
+- If interpolated frames are corrupted on an RTX 50-series GPU, check `install.ps1 status` and select `-RifeTrtBackend rtx -RifePrecision mixed`. If RTX still produces artifacts, test `-RifePrecision fp32` or `-RifeTrtBackend torch`.
 

@@ -1,0 +1,61 @@
+"""Installed RIFE backend and cache identity shared by all Python entry points."""
+
+from functools import lru_cache
+import hashlib
+import importlib
+import importlib.metadata
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+
+
+@lru_cache(maxsize=1)
+def profile() -> dict:
+    import torch
+
+    try:
+        data = json.loads(Path(__file__).with_name("rife-backend.json").read_text("utf-8"))
+        backend = data["backend"]
+        if backend not in ("standard", "rtx", "torch") or data["precision"] not in ("mixed", "fp32"):
+            raise ValueError("unknown backend or precision")
+        if (data["torch"], data["cuda"], data["gpu"]) != (
+            torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0)
+        ):
+            raise ValueError("PyTorch/CUDA or GPU differs from the installed profile")
+        if backend != "torch":
+            runtime = "tensorrt-rtx" if backend == "rtx" else "tensorrt"
+            opposite = "tensorrt" if backend == "rtx" else "tensorrt_rtx"
+            try:
+                importlib.metadata.distribution("torch-" + opposite.replace("_", "-"))
+            except importlib.metadata.PackageNotFoundError:
+                pass
+            else:
+                raise ValueError("conflicting Torch-TensorRT distributions")
+            if any(importlib.util.find_spec(opposite + suffix) is not None
+                   for suffix in ("", "_bindings", "_libs")):
+                raise ValueError("conflicting TensorRT bindings")
+            trt = importlib.import_module(runtime.replace("-", "_"))
+            if (data["version"], data["bridge"]) != (
+                trt.__version__, importlib.metadata.version("torch-" + runtime)
+            ):
+                raise ValueError("installed TensorRT package versions changed")
+        identity = "|".join(data[key] for key in ("bridge", "torch", "cuda", "gpu"))
+        fingerprint = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        namespace = f'v1-{backend}-{data["version"]}-{data["precision"]}-{fingerprint}'
+        if (not re.fullmatch(r"v1-[A-Za-z0-9._-]+", namespace)
+                or namespace != data["namespace"]):
+            raise ValueError("invalid cache namespace")
+    except (OSError, ValueError, TypeError, KeyError, ImportError, RuntimeError) as exc:
+        raise RuntimeError(f"RIFE backend profile invalid: {exc}. Rerun install.ps1 install.") from exc
+    os.environ["RIFE_TRT_BACKEND"] = backend
+    return data
+
+
+def cache_dir() -> Path:
+    root = os.environ.get("RIFE_TRT_CACHE_DIR")
+    root = Path(root) if root else Path(__file__).resolve().parents[1] / "cache" / "rife-trt"
+    directory = root / profile()["namespace"]
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory

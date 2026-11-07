@@ -2,8 +2,11 @@ import argparse
 import ctypes
 import os
 from pathlib import Path
+import re
 import sys
 import time
+import traceback
+from uuid import uuid4
 
 
 def _configure_background_limits() -> None:
@@ -57,29 +60,6 @@ def _effective_dimensions(width: int, height: int, downsample_1080: bool) -> tup
     return width, height
 
 
-def _write_validation_marker(cache_dir: Path, model: str, scale: float, width: int, height: int, downsample_1080: bool) -> None:
-    profile = _profile_label(model, scale, downsample_1080)
-    effective_width, effective_height = _effective_dimensions(width, height, downsample_1080)
-    key = f"{profile}-scale-{_scale_label(scale)}-{effective_width}x{effective_height}"
-    safe_key = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in key)
-    marker_dir = cache_dir / ".validated"
-    marker_dir.mkdir(parents=True, exist_ok=True)
-    (marker_dir / f"{safe_key}.ok").write_text("ok\n", encoding="utf-8")
-
-
-def _redirect_output(cache_dir: Path, model: str, scale: float, width: int, height: int, downsample_1080: bool) -> None:
-    profile = _profile_label(model, scale, downsample_1080)
-    effective_width, effective_height = _effective_dimensions(width, height, downsample_1080)
-    key = f"{profile}-scale-{_scale_label(scale)}-{effective_width}x{effective_height}"
-    safe_key = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in key)
-    stdout_path = cache_dir / f"{safe_key}.build.log"
-    stderr_path = cache_dir / f"{safe_key}.build.err.log"
-    stdout_file = stdout_path.open("a", encoding="utf-8")
-    stderr_file = stderr_path.open("a", encoding="utf-8")
-    sys.stdout = stdout_file
-    sys.stderr = stderr_file
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build a RIFE TensorRT engine cache for one runtime profile.")
     parser.add_argument("--width", type=int, required=True)
@@ -90,46 +70,80 @@ def main() -> int:
     parser.add_argument("--downsample-1080", action="store_true")
     parser.add_argument("--config-dir", required=True)
     parser.add_argument("--cache-dir", required=True)
+    parser.add_argument("--namespace", required=True)
     args = parser.parse_args()
-
-    config_dir = Path(args.config_dir)
-    cache_dir = Path(args.cache_dir)
+    if not re.fullmatch(r"v1-[A-Za-z0-9._-]+", args.namespace):
+        parser.error("invalid RIFE cache namespace")
+    if args.model != "4.26":
+        parser.error("unsupported RIFE model")
+    cache_dir = Path(args.cache_dir) / args.namespace
     cache_dir.mkdir(parents=True, exist_ok=True)
+    width, height = _effective_dimensions(args.width, args.height, args.downsample_1080)
+    label = _profile_label(args.model, args.scale, args.downsample_1080)
+    key = f"{label}-scale-{_scale_label(args.scale)}-{width}x{height}"
+    marker = cache_dir / ".validated" / f"{key}.ok"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.unlink(missing_ok=True)
     _configure_background_limits()
-    _redirect_output(cache_dir, args.model, args.scale, args.width, args.height, args.downsample_1080)
-    os.environ["RIFE_TRT_CACHE_DIR"] = str(cache_dir)
+    sys.stdout = (cache_dir / f"{key}.build.log").open("a", encoding="utf-8", buffering=1)
+    sys.stderr = (cache_dir / f"{key}.build.err.log").open("a", encoding="utf-8", buffering=1)
+    os.environ["RIFE_TRT_CACHE_DIR"] = args.cache_dir
     os.environ["RIFE_ALLOW_INLINE_TRT_BUILD"] = "1"
+    os.environ["RIFE_VALIDATE_OUTPUT"] = "1"
+    try:
+        _build(args)
+    except Exception:
+        traceback.print_exc()
+        marker.with_suffix(".ok.failed").write_text("see build logs\n", encoding="utf-8")
+        return 1
+    pending = marker.with_name(f"{marker.name}.{uuid4().hex}.tmp")
+    pending.write_text("ok\n", encoding="utf-8")
+    pending.replace(marker)
+    marker.with_suffix(".ok.failed").unlink(missing_ok=True)
+    return 0
 
-    sys.path.insert(0, str(config_dir))
+
+def _build(args) -> None:
+    sys.path.insert(0, args.config_dir)
     import vapoursynth as vs
 
+    from rife_backend import cache_dir, profile
     from rife_vpy_common import run_rife_profile
+    info = profile()
+    if info["namespace"] != args.namespace or info["backend"] == "torch":
+        raise RuntimeError("Requested cache does not match installed TensorRT backend")
+    print(f"RIFE {info['backend']} {info['version']} / {info['precision']}: {cache_dir()}")
 
     core = vs.core
-    clip = core.std.BlankClip(
+    base = core.std.BlankClip(
         width=args.width,
         height=args.height,
         format=vs.YUV420P10,
-        length=max(args.factor * 4 + 8, 24),
+        length=1,
         fpsnum=24,
         fpsden=1,
         color=[512, 512, 512],
     )
+    base = core.std.SetFrameProps(base, _Matrix=1, _ColorRange=1)
+    other = core.std.SetFrameProps(core.std.BlankClip(base, color=[544, 512, 512]),
+                                   _Matrix=1, _ColorRange=1)
+    source = (base + other) * 12
     clip = run_rife_profile(
-        clip,
+        source,
         model=args.model,
         scale=args.scale,
         factor_num=args.factor,
         factor_den=1,
         downsample_1080=args.downsample_1080,
+        strict=True,
     )
+    if clip.fps != source.fps * args.factor:
+        raise RuntimeError("RIFE validation did not produce interpolated frames")
 
     # Pull enough frames to force TensorRT engine build and run one warmed group.
     for frame_no in range(min(clip.num_frames, max(args.factor * 3, 8))):
         clip.get_frame(frame_no)
         time.sleep(0.02)
-    _write_validation_marker(cache_dir, args.model, args.scale, args.width, args.height, args.downsample_1080)
-    return 0
 
 
 if __name__ == "__main__":
