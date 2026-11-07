@@ -1793,11 +1793,19 @@ if ([int]::TryParse(($pidText -as [string]).Trim(), [ref]$procId) -and (Test-Shi
 } else {
     Write-LauncherLog "No shim process found"
 }
-$portablePrefix = [System.IO.Path]::GetFullPath($PortableDir)
+$separators = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+$portablePrefix = [System.IO.Path]::GetFullPath($PortableDir).TrimEnd($separators) + [System.IO.Path]::DirectorySeparatorChar
 Get-Process -ErrorAction SilentlyContinue | Where-Object {
-    ($_.ProcessName -eq "mpv" -or $_.ProcessName -eq "python") -and
-    $_.Path -and
-    ([System.IO.Path]::GetFullPath($_.Path).StartsWith($portablePrefix, [System.StringComparison]::OrdinalIgnoreCase))
+    if ($_.ProcessName -notin @("mpv", "python")) { return $false }
+    try {
+        # The process can exit while its executable path is being queried.
+        $processPath = $_.Path
+        if ([string]::IsNullOrWhiteSpace($processPath)) { return $false }
+        $fullPath = [System.IO.Path]::GetFullPath($processPath)
+        return $fullPath.StartsWith($portablePrefix, [System.StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
 } | ForEach-Object {
     Write-LauncherLog "Stopping portable child process $($_.ProcessName) PID=$($_.Id)"
     Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
